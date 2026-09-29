@@ -1,0 +1,18 @@
+# Dev config: PathMNIST on CPU. Later tasks (A2, A3, ...) add model/fl/policy sections.
+seed: 0
+
+data:
+  dataset: pathmnist
+  root: data/raw          # gitignored; downloaded on first use (~200MB)
+  image_size: 28
+  subsample: null         # e.g. 0.05 for smoke runs
+  n_sites: 8
+  dirichlet_alpha: 0.5    # lower = more label skew
+  size_sigma: 0.8         # lognormal spread of site sizes
+  min_site_size: 200
+  split: [0.7, 0.15, 0.15]  # per-site train / val / test
+  n_shifted: 2            # sites with synthetic acquisition shift
+  shift:
+    contrast: 0.6
+    blur_sigma: 1.0
+    noise_std: 8.0
