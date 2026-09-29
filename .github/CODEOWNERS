@@ -1,4 +1,4 @@
 # Replace with your two GitHub usernames. With "Require review from Code Owners" turned on,
 # every PR needs an approval from one of these two people, and nobody can approve their own PR.
 # So: Lead A's PRs need Lead B, Lead B's PRs need Lead A, and C's PRs need A or B.
-* @LEAD_A_GITHUB_USERNAME @LEAD_B_GITHUB_USERNAME
+* @ZShreyas @saishshetty05
