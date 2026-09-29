@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+# data, checkpoints and run outputs never go in git
+data/
+datasets/
+checkpoints/
+runs/
+outputs/
+*.pt
+*.pth
+*.ckpt
+# personal Claude Code settings (output style etc.) stay local
+.claude/settings.local.json
+.DS_Store
