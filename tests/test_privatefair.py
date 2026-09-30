@@ -4,6 +4,11 @@ Done-when (TEAM_PLAN.md): "Selection responds correctly to controlled
 risk/readiness/shift perturbations." The scenario tests below construct sites
 that differ in exactly one signal and check the coordinator reacts the way
 report section 4's score/constraints say it should.
+
+Also covers the coverage bound: test_coverage_bound_holds_across_many_seeds_and_settings
+mirrors test_policies.py's Gate G2 sweep, using real (random) telemetry reports
+each round, since select()'s reservation logic must hold regardless of what the
+score/shifted-slot stages do with the rest of the capacity.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ import pytest
 
 from privatefair.coordinator.privatefair import (
     PrivateFairCoordinator,
-    is_likely_full_speed,
+    is_full_capable,
     is_likely_shifted,
     p_shift_top,
     readiness_hat,
@@ -52,7 +57,7 @@ def test_risk_readiness_shift_helpers_on_one_hot_posteriors():
     assert readiness_hat(posterior) == pytest.approx(0.0)  # slowest bin -> normalized 0.0
     assert p_shift_top(posterior) == pytest.approx(1.0)
     assert is_likely_shifted(posterior) is True
-    assert is_likely_full_speed(posterior) is False
+    assert is_full_capable(posterior) is False
 
 
 def test_score_hand_computed():
@@ -135,16 +140,21 @@ def test_no_shifted_slot_reserved_when_no_site_is_likely_shifted():
 # ---------------------------------------------------------------------------
 
 
-def test_fastest_readiness_gets_full_others_get_compressed():
-    coord = _coordinator(capacity=2, max_age=1000)
+def test_readiness_bin_2_and_above_gets_full_below_gets_compressed():
+    # Per A5's TrueBins definition (issue #37), readiness bin 2 means "finishes a
+    # full round within the deadline" -- so bins 2 and 3 both mean FULL, not only
+    # the single fastest bin (3).
+    coord = _coordinator(capacity=3, max_age=1000)
     reports = {
-        1: _report(1, 0, utility=2, readiness=K_READINESS - 1, shift=1),  # fastest
-        2: _report(2, 0, utility=2, readiness=1, shift=1),  # not fastest
+        1: _report(1, 0, utility=2, readiness=K_READINESS - 1, shift=1),  # bin 3: fastest
+        2: _report(2, 0, utility=2, readiness=2, shift=1),  # bin 2: full-capable, not fastest
+        3: _report(3, 0, utility=2, readiness=1, shift=1),  # bin 1: not full-capable
     }
-    decision = coord.select(epoch=0, reports=reports, available=frozenset({1, 2}))
-    assert decision.selected == {1, 2}
+    decision = coord.select(epoch=0, reports=reports, available=frozenset({1, 2, 3}))
+    assert decision.selected == {1, 2, 3}
     assert decision.assignments[1] == ScheduleMode.FULL
-    assert decision.assignments[2] == ScheduleMode.COMPRESSED
+    assert decision.assignments[2] == ScheduleMode.FULL
+    assert decision.assignments[3] == ScheduleMode.COMPRESSED
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +185,61 @@ def test_overdue_but_capacity_exceeded_gets_explicit_reason():
     assert len(decision.selected) == 1
     leftover = next(iter(frozenset({1, 2}) - decision.selected))
     assert decision.deferral_reasons[leftover] == "coverage: overdue but capacity exceeded"
+
+
+def _random_report(rng: np.random.Generator, site_id: int, epoch: int) -> TelemetryReport:
+    return TelemetryReport(
+        site_id=site_id,
+        epoch=epoch,
+        utility=int(rng.integers(0, K_UTILITY)),
+        readiness=int(rng.integers(0, K_READINESS)),
+        shift=int(rng.integers(0, K_SHIFT)),
+    )
+
+
+def _simulate_worst_age(n_sites: int, capacity: int, max_age: int, seed: int, n_epochs: int = 60) -> int:
+    """Run an always-available trace with random telemetry each round and return
+    the largest age ever observed at the start of any epoch (before that
+    epoch's selection). Telemetry is randomized -- unlike CoverageRandomPolicy,
+    PrivateFairCoordinator's score and shifted-slot stages depend on report
+    content, so the coverage bound has to hold no matter what those stages pick
+    for the non-reserved capacity.
+    """
+    coord = PrivateFairCoordinator(capacity=capacity, max_age=max_age, rng=np.random.default_rng(seed), epsilon=1.0)
+    report_rng = np.random.default_rng(seed + 1_000_003)  # independent stream for telemetry content
+    available = frozenset(range(n_sites))
+    worst = 0
+    for epoch in range(n_epochs):
+        worst = max(worst, max(coord.tracker.age(s, epoch) for s in available))
+        reports = {s: _random_report(report_rng, s, epoch) for s in available}
+        decision = coord.select(epoch=epoch, reports=reports, available=available)
+        coord.observe(decision, completed=decision.selected)
+    return worst
+
+
+# capacity * max_age >= n_sites in every case: includes the exact settings
+# reported as failing before the fix (9,3,3), (8,2,4), (12,4,3).
+COVERAGE_FEASIBLE_SETTINGS = [
+    (9, 3, 3),
+    (8, 2, 4),
+    (12, 4, 3),
+    (6, 3, 2),
+    (5, 2, 3),
+]
+
+
+@pytest.mark.parametrize("n_sites,capacity,max_age", COVERAGE_FEASIBLE_SETTINGS)
+def test_coverage_bound_holds_across_many_seeds_and_settings(n_sites, capacity, max_age):
+    assert capacity * max_age >= n_sites, "test setting must be feasible for any policy to honor max_age"
+    violations = [
+        (seed, worst)
+        for seed in range(200)
+        if (worst := _simulate_worst_age(n_sites, capacity, max_age, seed)) > max_age
+    ]
+    assert not violations, (
+        f"n={n_sites} cap={capacity} max_age={max_age}: {len(violations)}/200 seeds exceeded the bound "
+        f"(worst cases: {violations[:5]})"
+    )
 
 
 # ---------------------------------------------------------------------------

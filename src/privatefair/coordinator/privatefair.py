@@ -4,9 +4,14 @@ and decision rule"; section 7.2 step 4, "Constrained selection and scheduling").
 
 Each epoch's `select()`:
   1. Decode every available site's TelemetryReport into a Posterior (B2).
-  2. Reserve capacity for eligible overdue sites (participation age >= max_age),
-     oldest-first and capped at capacity -- the same coverage rule B4's
-     CoverageRandomPolicy uses, so the two baselines stay comparable.
+  2. Reserve `min(required_now(...), capacity)` sites -- the oldest, by
+     participation age -- using the earliest-deadline-first feasibility check
+     shared with B4's CoverageRandomPolicy
+     (`coordinator.participation.required_now`). Forcing in only sites already
+     at `age >= max_age` is not enough to bound age on its own: several sites
+     can cross that threshold together in a later round with no room left for
+     all of them, so the reservation has to look ahead across every site's
+     deadline, not just this round's.
   3. If capacity remains, reserve one slot for the best "likely shifted" site
      available (its posterior's single most probable shift bin is the top one --
      a MAP call, not a raw-probability threshold, so the decision is easy to
@@ -15,9 +20,10 @@ Each epoch's `select()`:
          score = alpha * risk_hat + beta * p_shift_top + gamma * age + delta * readiness_hat
      risk_hat and readiness_hat are the posterior's normalized expected bin index
      (E[bin] / (K-1), in [0, 1]); p_shift_top is Pr(shift = the top bin).
-  5. Every selected site is assigned FULL if its posterior's most likely readiness
-     bin is the fastest one, else COMPRESSED -- using only the already-computed
-     MAP bin, never a raw telemetry value.
+  5. Every selected site is assigned FULL if its posterior's most likely
+     readiness bin is >= 2 ("finishes a full round within the deadline" and
+     above, per A5's TrueBins definition), else COMPRESSED -- using only the
+     already-computed MAP bin, never a raw telemetry value.
 
 This module only ever sees privatized TelemetryReport payloads and its own
 participation-age state -- never TrueBins -- so it respects the privacy boundary
@@ -31,7 +37,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from privatefair.coordinator.participation import ParticipationTracker
+from privatefair.coordinator.participation import ParticipationTracker, required_now
 from privatefair.coordinator.posterior import decode_report
 from privatefair.interfaces import ALPHABET_SIZE, CohortDecision, Posterior, ScheduleMode, Signal, TelemetryReport
 
@@ -63,9 +69,14 @@ def is_likely_shifted(posterior: Posterior) -> bool:
     return int(np.argmax(posterior.p_shift)) == len(posterior.p_shift) - 1
 
 
-def is_likely_full_speed(posterior: Posterior) -> bool:
-    """True if the fastest readiness bin is the posterior's single most probable bin (MAP)."""
-    return int(np.argmax(posterior.p_readiness)) == len(posterior.p_readiness) - 1
+# Per A5's TrueBins definition (issue #37): readiness bin 2 means "finishes a full
+# round within the deadline", bin 3 is faster still. Both can take a FULL load.
+FULL_CAPABLE_READINESS_BIN = 2
+
+
+def is_full_capable(posterior: Posterior) -> bool:
+    """True if the posterior's MAP readiness bin can complete a full round within the deadline."""
+    return int(np.argmax(posterior.p_readiness)) >= FULL_CAPABLE_READINESS_BIN
 
 
 @dataclass
@@ -122,10 +133,13 @@ class PrivateFairCoordinator:
         overdue_set = frozenset(s for s in candidates if ages[s] >= self.max_age)
         tiebreak = {s: self.rng.random() for s in candidates}
 
-        # 1. Mandatory coverage: oldest overdue sites first, capped at capacity.
-        overdue_order = sorted(overdue_set, key=lambda s: (-ages[s], -tiebreak[s]))
-        mandatory = frozenset(overdue_order[: self.capacity])
-        selected: set[int] = set(mandatory)
+        # 1. Coverage reservation: the minimum set of oldest sites that must be
+        # admitted now to keep every site's age bounded (see required_now's
+        # docstring) -- not just the sites already overdue.
+        need = min(required_now(ages.values(), self.capacity, self.max_age), self.capacity)
+        order_by_age = sorted(candidates, key=lambda s: (-ages[s], -tiebreak[s]))
+        reserved = frozenset(order_by_age[:need])
+        selected: set[int] = set(reserved)
 
         # 2. Shifted-site representation slot, if capacity remains.
         remaining = self.capacity - len(selected)
@@ -144,14 +158,17 @@ class PrivateFairCoordinator:
             selected.update(rest[:remaining])
 
         selected_frozen = frozenset(selected)
-        mandatory = mandatory & selected_frozen  # report only what actually got in as "mandatory"
+        # Report only sites that were *already* overdue and got in as "mandatory" --
+        # a reservation can also admit a site slightly ahead of its deadline as part
+        # of keeping the schedule feasible; that's not the same as being overdue.
+        mandatory = overdue_set & selected_frozen
 
         assignments: dict[int, ScheduleMode] = {}
         deferral_reasons: dict[int, str] = {}
         for s in candidates:
             if s in selected_frozen:
-                full_speed = s in posteriors and is_likely_full_speed(posteriors[s])
-                assignments[s] = ScheduleMode.FULL if full_speed else ScheduleMode.COMPRESSED
+                full_capable = s in posteriors and is_full_capable(posteriors[s])
+                assignments[s] = ScheduleMode.FULL if full_capable else ScheduleMode.COMPRESSED
             else:
                 assignments[s] = ScheduleMode.DEFERRED
                 deferral_reasons[s] = (
