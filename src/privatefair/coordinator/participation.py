@@ -7,6 +7,7 @@ the `Coordinator.observe()` call after each round (see interfaces.py).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 
@@ -25,6 +26,10 @@ class ParticipationTracker:
         """
         last = self._last_participated.get(site_id, -1)
         return epoch - last
+
+    def ages(self, site_ids: Iterable[int], epoch: int) -> dict[int, int]:
+        """`age()` for several sites at once -- e.g. for RoundLog.participation_age."""
+        return {site_id: self.age(site_id, epoch) for site_id in site_ids}
 
     def update(self, epoch: int, completed: frozenset[int]) -> None:
         """Record that these sites completed participation in `epoch`."""

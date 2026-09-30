@@ -51,6 +51,11 @@ class RandomPolicy:
         return CohortDecision(epoch=epoch, policy=self.name, assignments=assignments, deferral_reasons=deferral_reasons)
 
     def observe(self, decision: CohortDecision, completed: frozenset[int]) -> None:
+        if not completed <= decision.selected:
+            raise ValueError(
+                f"observe() got completed sites not in the decision's selection: "
+                f"{sorted(completed - decision.selected)}"
+            )
         self.tracker.update(decision.epoch, completed)
 
 
@@ -58,12 +63,23 @@ class RandomPolicy:
 class CoverageRandomPolicy:
     """Coverage-constrained random selection.
 
-    Sites whose participation age has reached `max_age` are "eligible overdue" and
-    are forced into the cohort before anything else; remaining capacity is filled
-    uniformly at random from the rest. If more sites are overdue than there is
-    capacity for, the most-overdue sites (ties broken by site_id) are prioritized
-    and the remainder stays deferred with a reason that says so explicitly --
-    capacity, not the policy, is what's limiting in that case.
+    Spare capacity is filled oldest-first (by participation age), not uniformly at
+    random. That's the difference that keeps the coverage bound tight: filling
+    spare slots at random lets several sites drift toward `max_age` together
+    without ever being prioritized over each other, so they can all become
+    overdue in the same round -- more than capacity can then admit at once, and
+    the bound is blown. Always giving spare capacity to the currently-oldest
+    sites (age ties broken by the rng, not site_id) turns this into an
+    oldest-first / round-robin schedule, which is what actually keeps every
+    site's age bounded as long as `capacity * max_age >= number of sites` (the
+    slack a coverage-constrained schedule needs to visit everyone in time).
+
+    Sites whose age has *already* reached `max_age` are still tracked separately
+    as `mandatory_sites` on the returned decision (informational: which sites the
+    coverage rule was actively forcing in, versus which were merely next in
+    line). If more sites are overdue than there is capacity for, the remainder
+    stays deferred with a reason that says so explicitly -- capacity, not the
+    policy, is what's limiting in that case.
     """
 
     capacity: int
@@ -81,14 +97,16 @@ class CoverageRandomPolicy:
     def select(self, epoch: int, reports: Mapping[int, TelemetryReport], available: frozenset[int]) -> CohortDecision:
         candidates = sorted(available)
         ages = {s: self.tracker.age(s, epoch) for s in candidates}
-        overdue = sorted((s for s in candidates if ages[s] >= self.max_age), key=lambda s: (-ages[s], s))
-        overdue_set = frozenset(overdue)
-        mandatory = frozenset(overdue[: self.capacity])
+        overdue_set = frozenset(s for s in candidates if ages[s] >= self.max_age)
 
-        remaining_capacity = self.capacity - len(mandatory)
-        rest = [s for s in candidates if s not in mandatory]
-        extra = _choose(self.rng, rest, remaining_capacity)
-        selected = mandatory | extra
+        # Oldest-first fill: sort every candidate by age descending, ties broken
+        # by an rng draw (not site_id), and give capacity to the top of that
+        # order. This always prioritizes whoever is closest to going overdue,
+        # not just those already there.
+        tiebreak = {s: self.rng.random() for s in candidates}
+        order = sorted(candidates, key=lambda s: (-ages[s], -tiebreak[s]))
+        selected = frozenset(order[: self.capacity])
+        mandatory = overdue_set & selected
 
         assignments: dict[int, ScheduleMode] = {}
         deferral_reasons: dict[int, str] = {}
@@ -110,4 +128,9 @@ class CoverageRandomPolicy:
         )
 
     def observe(self, decision: CohortDecision, completed: frozenset[int]) -> None:
+        if not completed <= decision.selected:
+            raise ValueError(
+                f"observe() got completed sites not in the decision's selection: "
+                f"{sorted(completed - decision.selected)}"
+            )
         self.tracker.update(decision.epoch, completed)

@@ -34,3 +34,9 @@ def test_update_only_touches_completed_sites():
     t.update(epoch=1, completed=frozenset({1}))  # site 2 not completed this time
     assert t.age(1, epoch=2) == 1
     assert t.age(2, epoch=2) == 2  # still dated to epoch 0
+
+
+def test_ages_batches_age_for_roundlog():
+    t = ParticipationTracker()
+    t.update(epoch=0, completed=frozenset({1}))
+    assert t.ages([1, 2, 3], epoch=2) == {1: 2, 2: 3, 3: 3}

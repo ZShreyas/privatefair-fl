@@ -1,10 +1,13 @@
 """Tests for RandomPolicy and CoverageRandomPolicy (task B4).
 
 Gate G2 (TEAM_PLAN.md): max participation age is provably bounded under a
-controlled trace -- test_gate_g2_max_age_never_exceeds_max_age below.
+controlled trace -- test_gate_g2_max_age_never_exceeds_max_age below, and
+test_gate_g2_bound_holds_across_many_seeds_and_settings for the broader claim.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import pytest
@@ -55,9 +58,19 @@ def test_random_policy_rejects_negative_capacity():
 def test_random_policy_observe_updates_tracker():
     policy = RandomPolicy(capacity=2, rng=np.random.default_rng(0))
     decision = policy.select(epoch=0, reports={}, available=frozenset({1, 2, 3}))
-    policy.observe(decision, completed=frozenset({1, 2}))
-    assert policy.tracker.age(1, epoch=1) == 1
-    assert policy.tracker.age(3, epoch=1) == 2  # never completed
+    completed_site = next(iter(decision.selected))
+    not_completed_site = next(iter(frozenset({1, 2, 3}) - decision.selected))
+    policy.observe(decision, completed=frozenset({completed_site}))
+    assert policy.tracker.age(completed_site, epoch=1) == 1
+    assert policy.tracker.age(not_completed_site, epoch=1) == 2  # never completed
+
+
+def test_observe_rejects_completed_sites_not_selected():
+    policy = RandomPolicy(capacity=1, rng=np.random.default_rng(0))
+    decision = policy.select(epoch=0, reports={}, available=frozenset({1, 2, 3}))
+    not_selected = next(iter(frozenset({1, 2, 3}) - decision.selected))
+    with pytest.raises(ValueError):
+        policy.observe(decision, completed=frozenset({not_selected}))
 
 
 # ---------------------------------------------------------------------------
@@ -148,3 +161,62 @@ def test_gate_g2_holds_with_intermittent_availability():
         assert max(ages.values()) <= max_age
         decision = policy.select(epoch=epoch, reports={}, available=available)
         policy.observe(decision, completed=decision.selected)
+
+
+def _simulate_worst_age(n_sites: int, capacity: int, max_age: int, seed: int, n_epochs: int = 60) -> int:
+    """Run a fixed-N, always-available trace and return the largest age ever
+    observed at the start of any epoch (i.e. before that epoch's selection)."""
+    policy = CoverageRandomPolicy(capacity=capacity, max_age=max_age, rng=np.random.default_rng(seed))
+    available = frozenset(range(n_sites))
+    worst = 0
+    for epoch in range(n_epochs):
+        worst = max(worst, max(policy.tracker.age(s, epoch) for s in available))
+        decision = policy.select(epoch=epoch, reports={}, available=available)
+        policy.observe(decision, completed=decision.selected)
+    return worst
+
+
+# capacity * max_age >= n_sites in every case here: the slack a coverage
+# schedule needs to be able to visit every site within max_age epochs.
+# (9, 3, 3) is the tight case originally reported as failing 144/200 seeds
+# under uniform-random spare-capacity fill.
+FEASIBLE_SETTINGS = [
+    (6, 3, 2),  # tight
+    (9, 3, 3),  # tight -- the reported failing case
+    (8, 2, 4),  # tight
+    (5, 2, 3),  # slack
+    (11, 4, 3),  # slack
+]
+
+
+@pytest.mark.parametrize("n_sites,capacity,max_age", FEASIBLE_SETTINGS)
+def test_gate_g2_bound_holds_across_many_seeds_and_settings(n_sites, capacity, max_age):
+    assert capacity * max_age >= n_sites, "test setting must be feasible for any policy to honor max_age"
+    violations = [
+        (seed, worst)
+        for seed in range(200)
+        if (worst := _simulate_worst_age(n_sites, capacity, max_age, seed)) > max_age
+    ]
+    assert not violations, (
+        f"n={n_sites} cap={capacity} max_age={max_age}: {len(violations)}/200 seeds exceeded the bound "
+        f"(worst cases: {violations[:5]})"
+    )
+
+
+def test_gate_g2_degrades_gracefully_when_infeasible():
+    """When capacity*max_age < n_sites, no policy can honor max_age for every
+    site -- there just isn't enough capacity to visit everyone that often. The
+    oldest-first fill should still cap age at the round-robin bound
+    ceil(n_sites/capacity) rather than letting some site's age grow without
+    bound while others are repeatedly reselected.
+    """
+    n_sites, capacity, max_age = 10, 3, 3
+    assert capacity * max_age < n_sites  # this setting is infeasible for max_age itself
+    round_robin_bound = math.ceil(n_sites / capacity)
+
+    for seed in range(200):
+        worst = _simulate_worst_age(n_sites, capacity, max_age, seed)
+        assert worst <= round_robin_bound, (
+            f"seed={seed}: worst age {worst} exceeded the round-robin bound {round_robin_bound} "
+            "even though max_age itself can't be honored here"
+        )
