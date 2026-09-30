@@ -16,3 +16,21 @@ data:
     contrast: 0.6
     blur_sigma: 1.0
     noise_std: 8.0
+
+model:
+  arch: resnet18
+  pretrained: true        # ImageNet weights (~45MB, cached by torchvision)
+  num_classes: 9
+
+train:                    # per site, per round (sim/local.py TrainConfig)
+  local_steps: 20         # fixed SGD steps, not epochs (sites have unequal sizes)
+  batch_size: 64
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  input_size: 64          # 28x28 upsampled; 224 is ~12x slower on CPU
+  eval_batch_size: 256
+
+fl:
+  rounds: 50
+  eval_every: 5           # per-site test eval at these rounds and the last one
