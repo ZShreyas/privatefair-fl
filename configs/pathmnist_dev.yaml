@@ -34,3 +34,10 @@ train:                    # per site, per round (sim/local.py TrainConfig)
 fl:
   rounds: 50
   eval_every: 5           # per-site test eval at these rounds and the last one
+
+telemetry:                # simulator-side true bins (sim/true_bins.py TelemetryConfig)
+  utility_tau: 0.02       # relative val-loss change; bin edges at +-tau, +-2*tau
+  val_max_samples: 512    # fixed per-site val subset used for the utility signal
+  fast_fraction: 0.5      # readiness 3 if expected time <= this fraction of the deadline
+  shift_thresholds: [2.0, 4.0]  # z < 2 typical, 2-4 uncertain, >= 4 shifted (normal sites ~1)
+  reference_size: 1000    # public unshifted reference images for the shift detector
