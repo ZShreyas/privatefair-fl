@@ -27,7 +27,8 @@ def main() -> None:
     seed = args.seed if args.seed is not None else cfg.get("seed", 0)
     run_id = args.run_id or f"{args.config.stem}-s{seed}"
 
-    path = run_from_config(cfg, seed, args.out, run_id)
+    print(f"run {run_id}: loading data and model...", flush=True)
+    path = run_from_config(cfg, seed, args.out, run_id, verbose=True)
     last = read_round_logs(path)[-1]
     print(f"wrote {path}")
     print(f"final round {last.epoch}: {last.global_metrics}")

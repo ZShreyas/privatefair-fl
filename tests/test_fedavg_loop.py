@@ -62,3 +62,13 @@ def test_log_contents(tmp_path):
     last = logs[-1]
     assert set(last.per_site_metrics) == {0, 1, 2}
     assert last.global_metrics["worst_balanced_acc"] <= last.global_metrics["mean_balanced_acc"]
+
+
+def test_verbose_prints_one_line_per_round_without_changing_logs(tmp_path, capsys):
+    quiet = _run(tmp_path / "quiet", seed=0, run_id="r").read_bytes()
+    logger = RunLogger(tmp_path / "loud", "r")
+    kwargs = {"num_classes": 3, "train_cfg": TRAIN, "fl_cfg": FL, "seed": 0, "logger": logger, "pretrained": False}
+    run_fedavg(_sites(), **kwargs, verbose=True)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("round")]
+    assert len(lines) == FL.rounds and "worst_acc" in lines[-1]
+    assert logger.path.read_bytes() == quiet  # progress printing never touches the log
