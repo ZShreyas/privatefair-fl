@@ -10,6 +10,7 @@ Determinism (same seed -> byte-identical rounds.jsonl):
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,8 +52,14 @@ def run_fedavg(
     seed: int,
     logger: RunLogger,
     pretrained: bool = True,
+    verbose: bool = False,
 ) -> Weights:
-    """Run FedAvg over all sites, logging one RoundLog per round. Returns the final global weights."""
+    """Run FedAvg over all sites, logging one RoundLog per round. Returns the final global weights.
+
+    `verbose` prints one progress line per round. Wall-clock time appears only in that
+    printout, never in the log, so Gate G1 is unaffected.
+    """
+    start = time.perf_counter()
     torch.manual_seed(seed)
     model = build_model(num_classes, pretrained=pretrained)
     global_w = get_weights(model)
@@ -102,7 +109,18 @@ def run_fedavg(
                 sim_only={"shifted_sites": shifted},
             )
         )
+        if verbose:
+            _print_progress(epoch, fl_cfg.rounds, global_metrics, time.perf_counter() - start)
     return global_w
+
+
+def _print_progress(epoch: int, rounds: int, metrics: Mapping[str, float], elapsed: float) -> None:
+    done = epoch + 1
+    eta_min = elapsed / done * (rounds - done) / 60
+    line = f"round {done:>3}/{rounds}  train_loss {metrics['mean_train_loss']:.3f}"
+    if "worst_balanced_acc" in metrics:
+        line += f"  mean_acc {metrics['mean_balanced_acc']:.3f}  worst_acc {metrics['worst_balanced_acc']:.3f}"
+    print(f"{line}  [{elapsed / 60:.1f} min, ~{eta_min:.0f} min left]", flush=True)
 
 
 def run_from_config(
@@ -111,6 +129,7 @@ def run_from_config(
     out_dir: str | Path,
     run_id: str,
     sites: Sequence[SiteData] | None = None,
+    verbose: bool = False,
 ) -> Path:
     """Build everything from a parsed YAML config, run, and return the rounds.jsonl path."""
     model_cfg = cfg.get("model", {})
@@ -127,5 +146,6 @@ def run_from_config(
         seed=seed,
         logger=logger,
         pretrained=model_cfg.get("pretrained", True),
+        verbose=verbose,
     )
     return logger.path
