@@ -6,7 +6,8 @@ venv/
 .pytest_cache/
 .ruff_cache/
 # data, checkpoints and run outputs never go in git
-data/
+# leading slash = repo root only, so src/privatefair/data/ (code) is not ignored
+/data/
 datasets/
 checkpoints/
 runs/
