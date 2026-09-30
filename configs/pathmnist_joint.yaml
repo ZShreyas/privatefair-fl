@@ -1,0 +1,47 @@
+# Joint-heterogeneity scenario: pathmnist_dev.yaml (data heterogeneity) + systems heterogeneity (A4).
+# Keep the shared sections in sync with pathmnist_dev.yaml; only `systems:` should differ.
+seed: 0
+
+data:
+  dataset: pathmnist
+  root: data/raw          # gitignored; downloaded on first use (~200MB)
+  image_size: 28
+  subsample: null         # e.g. 0.05 for smoke runs
+  n_sites: 8
+  dirichlet_alpha: 0.5    # lower = more label skew
+  size_sigma: 0.8         # lognormal spread of site sizes
+  min_site_size: 200
+  split: [0.7, 0.15, 0.15]  # per-site train / val / test
+  n_shifted: 2            # sites with synthetic acquisition shift
+  shift:
+    contrast: 0.6
+    blur_sigma: 1.0
+    noise_std: 8.0
+
+model:
+  arch: resnet18
+  pretrained: true        # ImageNet weights (~45MB, cached by torchvision)
+  num_classes: 9
+
+train:                    # per site, per round (sim/local.py TrainConfig)
+  local_steps: 20         # fixed SGD steps, not epochs (sites have unequal sizes)
+  batch_size: 64
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  input_size: 64          # 28x28 upsampled; 224 is ~12x slower on CPU
+  eval_batch_size: 256
+
+fl:
+  rounds: 50
+  eval_every: 5           # per-site test eval at these rounds and the last one
+
+systems:                  # A4 (sim/systems.py SystemsConfig); all times are simulated seconds
+  step_seconds: 1.0       # per local step at a median-speed site
+  speed_sigma: 0.6        # lognormal spread of site compute speed
+  bandwidth_mbps: 50.0    # median bandwidth
+  bandwidth_sigma: 0.8
+  jitter_sigma: 0.15      # round-to-round compute noise
+  p_available: 0.85       # long-run online fraction
+  stickiness: 0.7         # outages last several rounds (0 = independent each round)
+  deadline_factor: 1.5    # deadline = 1.5 x median expected full-round time

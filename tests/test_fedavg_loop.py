@@ -12,6 +12,7 @@ from privatefair.data.pathmnist import SiteData  # noqa: E402
 from privatefair.runlog import RunLogger, read_round_logs  # noqa: E402
 from privatefair.sim.fedavg_loop import FLConfig, run_fedavg  # noqa: E402
 from privatefair.sim.local import TrainConfig  # noqa: E402
+from privatefair.sim.systems import AvailabilityTrace, SystemsConfig  # noqa: E402
 
 pytestmark = pytest.mark.ml
 
@@ -62,3 +63,38 @@ def test_log_contents(tmp_path):
     last = logs[-1]
     assert set(last.per_site_metrics) == {0, 1, 2}
     assert last.global_metrics["worst_balanced_acc"] <= last.global_metrics["mean_balanced_acc"]
+
+
+SYSTEMS = SystemsConfig(p_available=0.6, stickiness=0.5, speed_sigma=1.0, deadline_factor=1.2)
+
+
+def _run_systems(tmp_path, seed=0):
+    logger = RunLogger(tmp_path, "r")
+    kwargs = {"num_classes": 3, "train_cfg": TRAIN, "seed": seed, "logger": logger, "pretrained": False}
+    run_fedavg(_sites(), fl_cfg=FLConfig(rounds=6, eval_every=3), systems=SYSTEMS, **kwargs)
+    return logger
+
+
+def test_systems_availability_and_deadline_misses_are_logged(tmp_path):
+    logger = _run_systems(tmp_path)
+    logs = read_round_logs(logger.path)
+    trace = AvailabilityTrace.load(logger.dir / "systems_trace.json")
+    saw_miss = saw_unavailable = False
+    for r in logs:
+        avail, missed = r.sim_only["available"], r.sim_only["deadline_missed"]
+        assert avail == sorted(trace.at(r.epoch)) and r.selected == avail
+        assert set(missed) <= set(avail)
+        completed = set(avail) - set(missed)
+        assert r.bytes_up * len(avail) == r.bytes_down * len(completed)
+        assert 0.0 <= r.round_seconds <= r.sim_only["deadline_seconds"] + 1e-9
+        # Server-derived ages: sites that finished this round have age 0.
+        assert all(r.participation_age[s] == 0 for s in completed)
+        saw_miss |= bool(missed)
+        saw_unavailable |= len(avail) < 3
+    assert saw_miss and saw_unavailable  # the config is harsh enough to exercise both paths
+
+
+def test_gate_g1_holds_with_systems(tmp_path):
+    a = _run_systems(tmp_path / "first").path.read_bytes()
+    b = _run_systems(tmp_path / "second").path.read_bytes()
+    assert a == b

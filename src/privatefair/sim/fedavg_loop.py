@@ -1,11 +1,12 @@
-"""Plain FedAvg training loop: every site trains every round (task A3, Gate G1).
+"""Plain FedAvg training loop: every available site trains every round (tasks A3, A4; Gate G1).
 
 Determinism (same seed -> byte-identical rounds.jsonl):
   * each site gets its own numpy Generator from SeedSequence([seed, site_id]), so a site's
     batches do not depend on how many other sites exist or their order;
   * torch.manual_seed(seed) fixes the new classifier head's initialization;
-  * wall-clock fields (round_seconds, controller_ms) are logged as 0.0. A4 fills
-    round_seconds from *simulated* time; there is no controller in this baseline.
+  * no wall-clock values are logged. Without a `systems` config every site is always available
+    and round_seconds is 0.0; with one (A4), availability, deadline misses and round_seconds
+    come from the seeded systems simulation. controller_ms is 0.0: there is no controller here.
 """
 
 from __future__ import annotations
@@ -18,12 +19,25 @@ from typing import Any
 import numpy as np
 import torch
 
+from privatefair.coordinator.participation import ParticipationTracker
 from privatefair.data.pathmnist import SiteData, load_sites
 from privatefair.fl.fedavg import FedAvg
 from privatefair.interfaces import ClientUpdate, RoundLog, ScheduleMode
 from privatefair.runlog import RunLogger
 from privatefair.sim.local import TrainConfig, evaluate, train_local
 from privatefair.sim.model import Weights, build_model, get_weights, set_weights
+from privatefair.sim.systems import (
+    JITTER_STREAM,
+    PROFILE_STREAM,
+    TRACE_STREAM,
+    RoundTiming,
+    SystemsConfig,
+    deadline_seconds,
+    generate_trace,
+    make_profiles,
+    simulate_round,
+    systems_rng,
+)
 
 POLICY_NAME = "fedavg_all"
 
@@ -51,8 +65,9 @@ def run_fedavg(
     seed: int,
     logger: RunLogger,
     pretrained: bool = True,
+    systems: SystemsConfig | None = None,
 ) -> Weights:
-    """Run FedAvg over all sites, logging one RoundLog per round. Returns the final global weights."""
+    """Run FedAvg over all (available) sites, logging one RoundLog per round. Returns the final global weights."""
     torch.manual_seed(seed)
     model = build_model(num_classes, pretrained=pretrained)
     global_w = get_weights(model)
@@ -61,17 +76,45 @@ def run_fedavg(
     ids = [s.site_id for s in sites]
     rngs = {s.site_id: site_rng(seed, s.site_id) for s in sites}
     shifted = sorted(s.site_id for s in sites if s.shifted)
+    tracker = ParticipationTracker()
+
+    if systems is not None:
+        profiles = make_profiles(ids, systems, systems_rng(seed, PROFILE_STREAM))
+        trace = generate_trace(ids, fl_cfg.rounds, systems, systems_rng(seed, TRACE_STREAM))
+        trace.save(logger.dir / "systems_trace.json")  # recorded trace: replayable, citable
+        jitter_rng = systems_rng(seed, JITTER_STREAM)
+        deadline = deadline_seconds(profiles, train_cfg.local_steps, nbytes, nbytes, systems.deadline_factor)
 
     for epoch in range(fl_cfg.rounds):
+        if systems is None:
+            participants = ids
+            timing = RoundTiming({}, frozenset(ids), 0.0)
+        else:
+            participants = sorted(trace.at(epoch))
+            steps = train_cfg.local_steps
+            timing = simulate_round(
+                profiles, participants, steps, nbytes, nbytes, deadline, systems.jitter_sigma, jitter_rng
+            )
+
         updates, train_losses = [], []
         for s in sites:
-            set_weights(model, global_w)
-            res = train_local(model, s.x_train, s.y_train, train_cfg, rngs[s.site_id])
-            updates.append(ClientUpdate(s.site_id, epoch, ScheduleMode.FULL, res.weights, 0.0, nbytes))
-            train_losses.append(res.mean_loss)
+            if s.site_id not in participants:
+                continue
+            done = s.site_id in timing.completed
+            weights = None
+            if done:  # a site that will miss the deadline contributes nothing, so skip its (costly) training
+                set_weights(model, global_w)
+                res = train_local(model, s.x_train, s.y_train, train_cfg, rngs[s.site_id])
+                weights = res.weights
+                train_losses.append(res.mean_loss)
+            secs = timing.site_seconds.get(s.site_id, 0.0)
+            updates.append(ClientUpdate(s.site_id, epoch, ScheduleMode.FULL, weights, secs, nbytes, completed=done))
         global_w = aggregator.aggregate(global_w, updates)
+        tracker.update(epoch, timing.completed)
 
-        global_metrics: dict[str, float] = {"mean_train_loss": float(np.mean(train_losses))}
+        global_metrics: dict[str, float] = {}
+        if train_losses:
+            global_metrics["mean_train_loss"] = float(np.mean(train_losses))
         per_site: dict[int, dict[str, float]] = {}
         if (epoch + 1) % fl_cfg.eval_every == 0 or epoch == fl_cfg.rounds - 1:
             set_weights(model, global_w)
@@ -79,27 +122,35 @@ def run_fedavg(
             bal = [m["balanced_acc"] for m in per_site.values()]
             global_metrics |= {"mean_balanced_acc": float(np.mean(bal)), "worst_balanced_acc": float(min(bal))}
 
+        sim_only: dict[str, Any] = {"shifted_sites": shifted}
+        if systems is not None:
+            sim_only |= {
+                "available": participants,
+                "deadline_missed": sorted(set(participants) - timing.completed),
+                "site_seconds": timing.site_seconds,
+                "deadline_seconds": deadline,
+            }
         logger.log(
             RoundLog(
                 run_id=logger.run_id,
                 seed=seed,
                 policy=POLICY_NAME,
                 epoch=epoch,
-                selected=ids,
-                modes={i: ScheduleMode.FULL.value for i in ids},
+                selected=list(participants),
+                modes={i: ScheduleMode.FULL.value for i in participants},
                 mandatory_sites=[],
                 deferral_reasons={},
                 telemetry=[],
                 posteriors=[],
-                participation_age={i: 0 for i in ids},  # everyone participates every round
+                participation_age=tracker.ages(ids, epoch),  # server-derived, after this round
                 epsilon_spent={i: 0.0 for i in ids},  # no telemetry released
-                round_seconds=0.0,
-                bytes_up=nbytes * len(ids),
-                bytes_down=nbytes * len(ids),
+                round_seconds=timing.round_seconds,
+                bytes_up=nbytes * len(timing.completed),  # only finished sites upload
+                bytes_down=nbytes * len(participants),
                 controller_ms=0.0,
                 per_site_metrics=per_site,
                 global_metrics=global_metrics,
-                sim_only={"shifted_sites": shifted},
+                sim_only=sim_only,
             )
         )
     return global_w
@@ -127,5 +178,6 @@ def run_from_config(
         seed=seed,
         logger=logger,
         pretrained=model_cfg.get("pretrained", True),
+        systems=SystemsConfig(**cfg["systems"]) if cfg.get("systems") else None,
     )
     return logger.path
