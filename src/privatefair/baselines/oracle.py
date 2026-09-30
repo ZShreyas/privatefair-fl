@@ -20,8 +20,17 @@ report 10.E's oracle (#3) vs. quantized-non-private (#4) gap is supposed to meas
 what coarsening into K categories costs. Scoring the oracle from the one-hot of the
 same quantized bin the non-private baseline already sees makes that gap zero by
 construction -- caught in review (both made identical decisions in 1500/1500
-simulated rounds before this fix). Using the raw values here gives the oracle real
+simulated rounds before that fix). Using the raw values here gives the oracle real
 information the coarsened baselines don't have, so the comparison is meaningful.
+
+The FULL/COMPRESSED and shifted-slot-eligibility *decisions* (as opposed to the
+continuous score) use the exact ground-truth boundary (`expected_seconds <=
+deadline_seconds`; `shift_z >= shift_scale`) via `_full_capable`/
+`_is_likely_shifted` overrides, not the argmax of the engineered posterior --
+also caught in review: that argmax tracks a target *expectation*, a different
+property, and does not reliably land on the correct side of either threshold
+(e.g. expected/deadline ratios of 0.5, 0.67 and 1.0 -- all comfortably within
+the deadline -- came out COMPRESSED under the argmax approach).
 """
 
 from __future__ import annotations
@@ -98,11 +107,13 @@ class RawOracleCoordinator(PrivateFairCoordinator):
     but unused -- there is no privatized report to decode.
 
     `utility_tau`/`shift_scale` set the continuous-to-[0,1] mapping for the risk
-    and shift scores; default to `sim.true_bins.TelemetryConfig`'s defaults
-    (`utility_tau=0.02`, the outer utility-bin edge is `2*utility_tau`; the
-    default `shift_thresholds` upper edge is 4.0) so the oracle's decision
-    boundaries line up with the quantized bins' by default. Pass the same values
-    your `TelemetryConfig` uses if you've changed them.
+    and shift *scores*, and `shift_scale` doubles as the exact shifted-slot
+    threshold in `_is_likely_shifted` (`shift_z >= shift_scale`). Both default to
+    `sim.true_bins.TelemetryConfig`'s defaults (`utility_tau=0.02`, the outer
+    utility-bin edge is `2*utility_tau`; the default `shift_thresholds` upper
+    edge is 4.0). Pass the same values your `TelemetryConfig` uses if you've
+    changed them. The FULL/COMPRESSED threshold (`_full_capable`) needs no such
+    constant -- it compares `expected_seconds` to `deadline_seconds` directly.
     """
 
     name: str = "raw_oracle"
@@ -146,3 +157,29 @@ class RawOracleCoordinator(PrivateFairCoordinator):
             p_readiness=_spread_expectation(self._readiness_raw(site_id), ALPHABET_SIZE["readiness"]),
             p_shift=_shift_distribution(self._shift_raw(site_id), ALPHABET_SIZE["shift"]),
         )
+
+    def _full_capable(self, site_id: int, posterior: Posterior) -> bool:
+        """Exact rule, not an argmax proxy: can this site finish a full round by
+        the deadline? `_posterior`'s `p_readiness` is engineered to hit a target
+        *expectation* (for `score()`'s continuous readiness_hat term) -- a
+        different property from "which bin is most probable" -- so its argmax
+        (what the base class's `is_full_capable` checks) does not reliably land
+        on the correct side of the FULL/COMPRESSED threshold. This checks the
+        real numbers directly instead. True with no systems config (no
+        expected/deadline in `raw`), matching the "always fast" default used
+        elsewhere.
+        """
+        expected = self._raw.get("expected_seconds", {}).get(site_id)
+        deadline = self._raw.get("deadline_seconds")
+        if expected is None or not deadline:
+            return True
+        return expected <= deadline
+
+    def _is_likely_shifted(self, site_id: int, posterior: Posterior) -> bool:
+        """Exact rule: true shift score at or past the "shifted" threshold
+        (matches `sim.bins.shift_bin`'s boundary, `shift_scale`), not an argmax
+        proxy over `_posterior`'s engineered distribution. Same rationale as
+        `_full_capable`.
+        """
+        z = self._raw.get("shift_z", {}).get(site_id)
+        return z is not None and z >= self.shift_scale

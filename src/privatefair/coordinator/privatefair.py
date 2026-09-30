@@ -162,6 +162,28 @@ class PrivateFairCoordinator:
             + delta * readiness_hat(posterior)
         )
 
+    def _full_capable(self, site_id: int, posterior: Posterior) -> bool:
+        """Whether a selected site can complete a FULL round within the deadline.
+
+        Default: the posterior's MAP readiness bin is >= FULL_CAPABLE_READINESS_BIN
+        (`is_full_capable`). Override this -- separately from `_posterior` -- for a
+        coordinator whose posterior isn't a real categorical belief and so its
+        argmax doesn't track the literal deadline boundary: e.g. the raw-telemetry
+        oracle engineers a posterior to hit a target *expectation* (for `score()`'s
+        continuous readiness_hat term), which is a different property from "which
+        bin is most probable" and does not reliably put the argmax on the correct
+        side of the FULL/COMPRESSED threshold. See `baselines.oracle.RawOracleCoordinator`.
+        """
+        return is_full_capable(posterior)
+
+    def _is_likely_shifted(self, site_id: int, posterior: Posterior) -> bool:
+        """Whether a site is eligible for the shifted-site representation slot.
+
+        Default: the posterior's MAP shift bin is the top (shifted) one
+        (`is_likely_shifted`). Same override rationale as `_full_capable`.
+        """
+        return is_likely_shifted(posterior)
+
     def select(self, epoch: int, reports: Mapping[int, TelemetryReport], available: frozenset[int]) -> CohortDecision:
         candidates = sorted(available)
         ages = {s: self.tracker.age(s, epoch) for s in candidates}
@@ -189,7 +211,9 @@ class PrivateFairCoordinator:
         remaining = self.capacity - len(selected)
         if remaining > 0 and self.drop_signal != "shift":
             shifted_candidates = [
-                s for s in candidates if s not in selected and s in posteriors and is_likely_shifted(posteriors[s])
+                s
+                for s in candidates
+                if s not in selected and s in posteriors and self._is_likely_shifted(s, posteriors[s])
             ]
             if shifted_candidates:
                 best = max(shifted_candidates, key=lambda s: (p_shift_top(posteriors[s]), tiebreak[s]))
@@ -221,7 +245,7 @@ class PrivateFairCoordinator:
                     # correctly as a deadline miss in the systems simulation.
                     full_capable = True
                 else:
-                    full_capable = s in posteriors and is_full_capable(posteriors[s])
+                    full_capable = s in posteriors and self._full_capable(s, posteriors[s])
                 assignments[s] = ScheduleMode.FULL if full_capable else ScheduleMode.COMPRESSED
             else:
                 assignments[s] = ScheduleMode.DEFERRED

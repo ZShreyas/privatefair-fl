@@ -1,12 +1,26 @@
 """Tests for RawOracleCoordinator (task B6, report section 10.E #3).
 
-Review on #41 found the oracle scored from the *quantized* true bins (one-hot),
-making it decision-for-decision identical to the "quantized non-private" baseline
-(NaiveDecodingCoordinator + NoPrivacyPrivatizer) -- the oracle-vs-quantized gap
-report 10.E #3/#4 is supposed to measure what coarsening costs was zero by
-construction. Fixed to score from the continuous pre-quantization values in
-`raw` (A6/#40's shape) instead; test_diverges_from_quantized_baseline_within_the_same_bin
-below is the regression guard for that specific bug.
+Two rounds of review found two distinct bugs, both fixed here:
+
+1. (#41) The oracle scored from the *quantized* true bins (one-hot), making it
+   decision-for-decision identical to the "quantized non-private" baseline
+   (NaiveDecodingCoordinator + NoPrivacyPrivatizer) -- the oracle-vs-quantized
+   gap report 10.E #3/#4 is supposed to measure what coarsening costs was zero
+   by construction. Fixed to score from the continuous pre-quantization values
+   in `raw` (A6/#40's shape) instead.
+   Regression guard: test_diverges_from_quantized_baseline_within_the_same_bin.
+
+2. (follow-up review) `_posterior`'s p_readiness/p_shift are engineered to hit a
+   target *expectation* (needed for score()'s continuous readiness_hat/p_shift_top
+   terms), which is a different property from "which bin is most probable" --
+   so using their argmax for the FULL/COMPRESSED and shifted-slot-eligibility
+   *decisions* (`is_full_capable`/`is_likely_shifted`, inherited from
+   PrivateFairCoordinator) silently gave the wrong answer: sites comfortably
+   within their deadline (expected/deadline ratios of 0.5, 0.67, 1.0) came out
+   COMPRESSED. Fixed with `_full_capable`/`_is_likely_shifted` overrides that
+   check the exact raw numbers instead of any posterior's argmax.
+   Regression guard: test_full_capable_uses_exact_deadline_not_argmax and
+   test_full_capable_reviewer_repro_cases.
 """
 
 from __future__ import annotations
@@ -113,7 +127,7 @@ def test_missing_systems_timing_defaults_to_fast():
     coord.observe_truth({1: _true(1, 0, 2, 3, 0)}, raw={})
     posterior = coord._posterior(1, None, 0)
     assert readiness_hat(posterior) == pytest.approx(1.0)
-    assert is_full_capable(posterior) is True
+    assert coord._full_capable(1, posterior) is True
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +174,61 @@ def test_oracle_reacts_to_raw_shift_and_readiness():
         raw={"shift_z": {1: 4.0}, "expected_seconds": {1: 1.0}, "deadline_seconds": 10.0},
     )
     posterior = coord._posterior(1, None, 0)
-    assert is_likely_shifted(posterior) is True
-    assert is_full_capable(posterior) is True
+    assert coord._is_likely_shifted(1, posterior) is True
+    assert coord._full_capable(1, posterior) is True
+
+
+# ---------------------------------------------------------------------------
+# _full_capable / _is_likely_shifted: exact rule, not an argmax proxy
+# ---------------------------------------------------------------------------
+
+
+def test_full_capable_uses_exact_deadline_not_argmax():
+    # This is the bug: p_readiness is engineered to hit a target *expectation*,
+    # so its argmax (what the base class's free is_full_capable checks) does
+    # not reliably track the FULL/COMPRESSED deadline boundary. Demonstrate the
+    # mismatch directly, then confirm the override gets it right.
+    coord = _coordinator(capacity=1, max_age=1000)
+    coord.observe_truth({1: _true(1, 0, 2, 3, 0)}, raw={"expected_seconds": {1: 5.0}, "deadline_seconds": 10.0})
+    posterior = coord._posterior(1, None, 0)  # ratio=0.5, comfortably within deadline
+    assert is_full_capable(posterior) is False  # the argmax-based free function gets this wrong
+    assert coord._full_capable(1, posterior) is True  # the exact-rule override gets it right
+
+
+@pytest.mark.parametrize("ratio", [0.0, 0.5, 0.67, 1.0])
+def test_full_capable_reviewer_repro_cases(ratio):
+    # Exact ratios from review: all comfortably within (or exactly at) the
+    # deadline, all must be FULL-capable.
+    coord = _coordinator(capacity=1, max_age=1000)
+    coord.observe_truth(
+        {1: _true(1, 0, 2, 3, 0)}, raw={"expected_seconds": {1: ratio * 10.0}, "deadline_seconds": 10.0}
+    )
+    decision = coord.select(epoch=0, reports={}, available=frozenset({1}))
+    assert decision.assignments[1] == ScheduleMode.FULL
+
+
+def test_full_capable_false_past_the_deadline():
+    coord = _coordinator(capacity=1, max_age=1000)
+    coord.observe_truth({1: _true(1, 0, 2, 3, 0)}, raw={"expected_seconds": {1: 15.0}, "deadline_seconds": 10.0})
+    decision = coord.select(epoch=0, reports={}, available=frozenset({1}))
+    assert decision.assignments[1] == ScheduleMode.COMPRESSED
+
+
+def test_is_likely_shifted_uses_exact_threshold_not_argmax():
+    # z=3.0: past the argmax flip point (z>2, since dist=[1-z/4, 0, z/4] flips
+    # argmax at z/4>0.5) but below shift_bin's actual "shifted" threshold (4.0).
+    coord = _coordinator(capacity=2, max_age=1000)
+    coord.observe_truth({1: _true(1, 0, 2, 3, 1)}, raw={"shift_z": {1: 3.0}})
+    posterior = coord._posterior(1, None, 0)
+    assert is_likely_shifted(posterior) is True  # argmax-based free function: past its own flip point
+    assert coord._is_likely_shifted(1, posterior) is False  # exact rule: below the real shifted threshold
+
+
+def test_is_likely_shifted_true_at_the_exact_threshold():
+    coord = _coordinator(capacity=1, max_age=1000)
+    coord.observe_truth({1: _true(1, 0, 2, 3, 2)}, raw={"shift_z": {1: 4.0}})
+    posterior = coord._posterior(1, None, 0)
+    assert coord._is_likely_shifted(1, posterior) is True
 
 
 def test_observe_truth_only_covers_sites_it_was_given():
