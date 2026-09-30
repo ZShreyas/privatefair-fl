@@ -1,0 +1,33 @@
+# Smoke config: runs in seconds on CPU. Checks the pipeline end to end, not accuracy.
+seed: 0
+
+data:
+  dataset: pathmnist
+  root: data/raw
+  image_size: 28
+  subsample: 0.02         # ~2k images
+  n_sites: 3
+  dirichlet_alpha: 0.5
+  size_sigma: 0.8
+  min_site_size: 20
+  split: [0.7, 0.15, 0.15]
+  n_shifted: 1
+  shift:
+    contrast: 0.6
+    blur_sigma: 1.0
+    noise_std: 8.0
+
+model:
+  arch: resnet18
+  pretrained: true
+  num_classes: 9
+
+train:
+  local_steps: 2
+  batch_size: 16
+  input_size: 32
+  eval_batch_size: 256
+
+fl:
+  rounds: 2
+  eval_every: 1
