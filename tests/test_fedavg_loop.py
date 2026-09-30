@@ -98,3 +98,33 @@ def test_gate_g1_holds_with_systems(tmp_path):
     a = _run_systems(tmp_path / "first").path.read_bytes()
     b = _run_systems(tmp_path / "second").path.read_bytes()
     assert a == b
+
+
+def test_verbose_prints_one_line_per_round_without_changing_logs(tmp_path, capsys):
+    quiet = _run(tmp_path / "quiet", seed=0, run_id="r").read_bytes()
+    logger = RunLogger(tmp_path / "loud", "r")
+    kwargs = {"num_classes": 3, "train_cfg": TRAIN, "fl_cfg": FL, "seed": 0, "logger": logger, "pretrained": False}
+    run_fedavg(_sites(), **kwargs, verbose=True)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("round")]
+    assert len(lines) == FL.rounds and "worst_acc" in lines[-1]
+    assert logger.path.read_bytes() == quiet  # progress printing never touches the log
+
+
+def test_verbose_prints_without_train_loss_when_every_site_misses_deadline(tmp_path, capsys):
+    # A harsh systems config where round 0 can plausibly have zero completions --
+    # _print_progress must not KeyError on a missing "mean_train_loss".
+    logger = RunLogger(tmp_path, "r")
+    systems = SystemsConfig(p_available=0.6, stickiness=0.5, speed_sigma=1.0, deadline_factor=0.01)
+    run_fedavg(
+        _sites(),
+        num_classes=3,
+        train_cfg=TRAIN,
+        fl_cfg=FLConfig(rounds=3, eval_every=2),
+        seed=0,
+        logger=logger,
+        pretrained=False,
+        systems=systems,
+        verbose=True,
+    )
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("round")]
+    assert len(lines) == 3  # printed successfully for every round, train_loss or not
