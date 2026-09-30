@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from privatefair.coordinator.participation import ParticipationTracker
+from privatefair.coordinator.participation import ParticipationTracker, required_now
 from privatefair.interfaces import CohortDecision, ScheduleMode, TelemetryReport
 
 
@@ -63,23 +63,27 @@ class RandomPolicy:
 class CoverageRandomPolicy:
     """Coverage-constrained random selection.
 
-    Spare capacity is filled oldest-first (by participation age), not uniformly at
-    random. That's the difference that keeps the coverage bound tight: filling
-    spare slots at random lets several sites drift toward `max_age` together
-    without ever being prioritized over each other, so they can all become
-    overdue in the same round -- more than capacity can then admit at once, and
-    the bound is blown. Always giving spare capacity to the currently-oldest
-    sites (age ties broken by the rng, not site_id) turns this into an
-    oldest-first / round-robin schedule, which is what actually keeps every
-    site's age bounded as long as `capacity * max_age >= number of sites` (the
-    slack a coverage-constrained schedule needs to visit everyone in time).
+    Each round reserves `min(required_now(...), capacity)` sites -- the oldest
+    ones, by participation age -- using the shared earliest-deadline-first
+    feasibility check in `coordinator.participation.required_now`. That
+    reservation is what keeps the coverage bound tight: forcing in only the
+    sites already at `age >= max_age` is not enough, because several sites can
+    then cross that threshold together in a later round with no room left for
+    all of them. `required_now` looks ahead across every site's deadline, not
+    just this round's, and returns the minimum that must be admitted now to
+    avoid that.
 
-    Sites whose age has *already* reached `max_age` are still tracked separately
-    as `mandatory_sites` on the returned decision (informational: which sites the
-    coverage rule was actively forcing in, versus which were merely next in
-    line). If more sites are overdue than there is capacity for, the remainder
-    stays deferred with a reason that says so explicitly -- capacity, not the
-    policy, is what's limiting in that case.
+    Whatever capacity is left after the reservation is filled uniformly at
+    random -- that's the "random" this policy is named for, and the reservation
+    is deliberately the *minimum* needed so as much capacity as possible stays
+    random rather than being swallowed by a rigid oldest-first rotation.
+
+    `mandatory_sites` on the returned decision reports only the sites that were
+    *already* at `age >= max_age` and got selected -- not every reserved site,
+    since a reservation can also admit a site slightly before its deadline as
+    part of keeping the schedule feasible. If more already-overdue sites exist
+    than capacity allows, the remainder stays deferred with a reason that says
+    so explicitly -- capacity, not the policy, is what's limiting in that case.
     """
 
     capacity: int
@@ -96,16 +100,18 @@ class CoverageRandomPolicy:
 
     def select(self, epoch: int, reports: Mapping[int, TelemetryReport], available: frozenset[int]) -> CohortDecision:
         candidates = sorted(available)
-        ages = {s: self.tracker.age(s, epoch) for s in candidates}
+        ages = self.tracker.ages(candidates, epoch)
         overdue_set = frozenset(s for s in candidates if ages[s] >= self.max_age)
-
-        # Oldest-first fill: sort every candidate by age descending, ties broken
-        # by an rng draw (not site_id), and give capacity to the top of that
-        # order. This always prioritizes whoever is closest to going overdue,
-        # not just those already there.
         tiebreak = {s: self.rng.random() for s in candidates}
+
+        need = min(required_now(ages.values(), self.capacity, self.max_age), self.capacity)
         order = sorted(candidates, key=lambda s: (-ages[s], -tiebreak[s]))
-        selected = frozenset(order[: self.capacity])
+        reserved = frozenset(order[:need])
+
+        remaining = self.capacity - len(reserved)
+        rest = [s for s in candidates if s not in reserved]
+        extra = _choose(self.rng, rest, remaining)
+        selected = reserved | extra
         mandatory = overdue_set & selected
 
         assignments: dict[int, ScheduleMode] = {}

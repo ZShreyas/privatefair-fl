@@ -39,3 +39,32 @@ class ParticipationTracker:
     def last_participated_epoch(self, site_id: int) -> int | None:
         """The last epoch `site_id` completed participation, or None if never."""
         return self._last_participated.get(site_id)
+
+
+def required_now(ages: Iterable[int], capacity: int, max_age: int) -> int:
+    """Minimum number of sites that must be admitted *this* round to keep every
+    site's age from exceeding `max_age`, given only `capacity` slots per round
+    from now on.
+
+    This is the earliest-deadline-first demand-bound feasibility check: a site
+    with current age `a` must be served again within `max_age - a` further
+    rounds (0 if it's already due). For each lookahead window of `k+1` rounds
+    (this round plus `k` more, for `k` in `0..max_age`), every site due within
+    that window must fit inside the `capacity * k` slots the window has left
+    *after* this round -- so `count(age >= max_age - k) - capacity * k` sites
+    from that window's demand cannot be deferred even one more round. The
+    binding (largest) such deficit across every window is what must be
+    admitted now; forcing only the sites already at `age >= max_age` (`k=0`)
+    is not enough on its own, because several sites can then cross the
+    threshold together in a later round with no room left for all of them.
+
+    Reserving `min(required_now(...), capacity)` oldest sites like this, before
+    any other selection logic runs, is what actually keeps a coordinator's
+    coverage bound tight -- filling spare capacity by any other rule (random,
+    score, ...) for the *rest* of the slots does not affect the guarantee.
+    """
+    ages = list(ages)
+    if not ages:
+        return 0
+    needs = (sum(1 for a in ages if a >= max_age - k) - capacity * k for k in range(max_age + 1))
+    return max(0, max(needs))
