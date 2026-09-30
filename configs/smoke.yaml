@@ -31,3 +31,8 @@ train:
 fl:
   rounds: 2
   eval_every: 1
+
+systems:                  # A4: availability, speeds, deadlines (simulated seconds)
+  p_available: 0.85
+  stickiness: 0.7
+  deadline_factor: 1.5
