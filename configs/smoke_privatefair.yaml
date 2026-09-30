@@ -1,0 +1,56 @@
+# Smoke config for the policy-driven loop (A6): PrivateFair + local DP + systems, seconds on CPU.
+seed: 0
+
+data:
+  dataset: pathmnist
+  root: data/raw
+  image_size: 28
+  subsample: 0.02         # ~2k images
+  n_sites: 3
+  dirichlet_alpha: 0.5
+  size_sigma: 0.8
+  min_site_size: 20
+  split: [0.7, 0.15, 0.15]
+  n_shifted: 1
+  shift:
+    contrast: 0.6
+    blur_sigma: 1.0
+    noise_std: 8.0
+
+model:
+  arch: resnet18
+  pretrained: true
+  num_classes: 9
+
+train:
+  local_steps: 2
+  batch_size: 16
+  input_size: 32
+  eval_batch_size: 256
+
+fl:
+  rounds: 2
+  eval_every: 1
+
+systems:                  # A4: availability, speeds, deadlines (simulated seconds)
+  p_available: 0.85
+  stickiness: 0.7
+  deadline_factor: 1.5
+
+policy:                   # A6 (sim/policies.py): fedavg_all | random | coverage_random | privatefair
+  name: privatefair
+  capacity: 2             # sites per round
+  max_age: 3              # hard coverage (2 x 3 = 6 >= 3 sites)
+  alpha: 1.0              # score weights (report section 4): risk
+  beta: 1.0               # shift
+  gamma: 0.1              # participation age (raw rounds)
+  delta: 1.0              # readiness
+
+privacy:                  # local DP on the three telemetry signals
+  mode: rr                # rr = K-ary randomized response; none = non-private (B6 baselines only)
+  epsilon: 1.0            # per signal per report (one value, or utility/readiness/shift mapping)
+  cap: null               # max composed epsilon per site over the run; exceeding it stops the run
+
+telemetry:
+  val_max_samples: 64     # keep the smoke run fast
+  reference_size: 200

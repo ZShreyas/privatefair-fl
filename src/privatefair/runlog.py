@@ -33,3 +33,21 @@ class RunLogger:
 def read_round_logs(path: str | Path) -> list[RoundLog]:
     with Path(path).open(encoding="utf-8") as f:
         return [RoundLog.from_json(line) for line in f if line.strip()]
+
+
+# Real wall-clock measurements (the report asks for controller runtime). They differ run to run,
+# so reproducibility checks (Gate G1) compare everything except these.
+WALLCLOCK_FIELDS = ("controller_ms",)
+
+
+def read_comparable(path: str | Path) -> list[dict[str, Any]]:
+    """Rounds as plain dicts without wall-clock fields: equal lists mean two runs reproduced exactly."""
+    out = []
+    with Path(path).open(encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                d = json.loads(line)
+                for key in WALLCLOCK_FIELDS:
+                    d.pop(key, None)
+                out.append(d)
+    return out
