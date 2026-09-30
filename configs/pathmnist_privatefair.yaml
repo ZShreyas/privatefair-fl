@@ -1,5 +1,5 @@
-# Joint-heterogeneity scenario: pathmnist_dev.yaml (data heterogeneity) + systems heterogeneity (A4).
-# Keep the shared sections in sync with pathmnist_dev.yaml; only `systems:` should differ.
+# PrivateFair under joint heterogeneity: pathmnist_joint.yaml + policy + privacy (A6).
+# Swap policy.name (random / coverage_random / fedavg_all) with the same capacity for baselines.
 seed: 0
 
 data:
@@ -52,3 +52,17 @@ systems:                  # A4 (sim/systems.py SystemsConfig); all times are sim
   p_available: 0.85       # long-run online fraction
   stickiness: 0.7         # outages last several rounds (0 = independent each round)
   deadline_factor: 1.5    # deadline = 1.5 x median expected full-round time
+
+policy:                   # A6 (sim/policies.py): fedavg_all | random | coverage_random | privatefair
+  name: privatefair
+  capacity: 3             # sites per round
+  max_age: 5              # hard coverage: no site waits more than 5 rounds (3 x 5 = 15 >= 8 sites: real slack)
+  alpha: 1.0              # score weights (report section 4): risk
+  beta: 1.0               # shift
+  gamma: 0.1              # participation age (raw rounds)
+  delta: 1.0              # readiness
+
+privacy:                  # local DP on the three telemetry signals
+  mode: rr                # rr = K-ary randomized response; none = non-private (B6 baselines only)
+  epsilon: 1.0            # per signal per report (one value, or utility/readiness/shift mapping)
+  cap: null               # max composed epsilon per site over the run; exceeding it stops the run
