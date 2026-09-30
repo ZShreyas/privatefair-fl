@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from privatefair.coordinator.posterior import decode_report, decode_signal, uniform_prior
+from privatefair.coordinator.posterior import decode_report, decode_signal, one_hot, one_hot_posterior, uniform_prior
 from privatefair.interfaces import ALPHABET_SIZE, SIGNALS, TelemetryReport
 from privatefair.privacy.rr import channel_matrix
 
@@ -95,3 +95,27 @@ def test_decode_report_agrees_with_decode_signal():
     assert posterior.p_utility == pytest.approx(decode_signal(0, ALPHABET_SIZE["utility"], 1.5))
     assert posterior.p_readiness == pytest.approx(decode_signal(0, ALPHABET_SIZE["readiness"], 1.5))
     assert posterior.p_shift == pytest.approx(decode_signal(0, ALPHABET_SIZE["shift"], 1.5))
+
+
+# ---------------------------------------------------------------------------
+# one_hot / one_hot_posterior (task B6: naive decoding, raw oracle)
+# ---------------------------------------------------------------------------
+
+
+def test_one_hot_puts_all_mass_on_the_bin():
+    assert one_hot(2, 5) == (0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def test_one_hot_rejects_out_of_range():
+    with pytest.raises(ValueError):
+        one_hot(5, 5)
+    with pytest.raises(ValueError):
+        one_hot(-1, 5)
+
+
+def test_one_hot_posterior_shape_and_content():
+    p = one_hot_posterior(site_id=3, epoch=1, utility=4, readiness=0, shift=2)
+    assert p.site_id == 3 and p.epoch == 1
+    assert p.p_utility == one_hot(4, ALPHABET_SIZE["utility"])
+    assert p.p_readiness == one_hot(0, ALPHABET_SIZE["readiness"])
+    assert p.p_shift == one_hot(2, ALPHABET_SIZE["shift"])

@@ -243,6 +243,72 @@ def test_coverage_bound_holds_across_many_seeds_and_settings(n_sites, capacity, 
 
 
 # ---------------------------------------------------------------------------
+# B6 ablations: coverage=False, drop_signal
+# ---------------------------------------------------------------------------
+
+
+def test_no_coverage_ablation_does_not_force_in_overdue_sites():
+    # Same setup as test_overdue_site_is_forced_in_despite_low_score, but with
+    # coverage disabled: site 1 is overdue (age 3 >= max_age 3) yet has the
+    # worst possible score, so without the coverage rule it should lose to
+    # site 2 on score instead of being forced in.
+    coord = _coordinator(capacity=1, max_age=3, coverage=False, alpha=1.0, beta=1.0, gamma=0.0, delta=1.0)
+    coord.tracker.update(epoch=0, completed=frozenset({2}))
+    reports = {
+        1: _report(1, 2, utility=0, readiness=0, shift=0),  # overdue, worst score
+        2: _report(2, 2, utility=4, readiness=3, shift=2),  # not overdue, best score
+    }
+    decision = coord.select(epoch=2, reports=reports, available=frozenset({1, 2}))
+    assert decision.selected == {2}
+    assert decision.mandatory_sites == frozenset()  # coverage disabled -> nothing is ever "mandatory"
+    assert decision.deferral_reasons[1] == "not selected: score"  # not the "coverage exceeded" wording
+
+
+def _one_hot_posterior(utility, readiness, shift):
+    return Posterior(
+        site_id=0,
+        epoch=0,
+        p_utility=tuple(1.0 if i == utility else 0.0 for i in range(K_UTILITY)),
+        p_readiness=tuple(1.0 if i == readiness else 0.0 for i in range(K_READINESS)),
+        p_shift=tuple(1.0 if i == shift else 0.0 for i in range(K_SHIFT)),
+    )
+
+
+def test_drop_signal_utility_zeroes_risk_contribution():
+    coord = _coordinator(capacity=1, max_age=1000, drop_signal="utility")
+    low_risk = coord.score(_one_hot_posterior(utility=0, readiness=0, shift=0), age=0)
+    high_risk = coord.score(_one_hot_posterior(utility=4, readiness=0, shift=0), age=0)
+    assert low_risk == pytest.approx(high_risk)  # utility no longer moves the score
+
+
+def test_drop_signal_shift_disables_shifted_slot():
+    # Same setup as test_shifted_site_gets_reserved_slot_even_with_lower_score,
+    # but with the shift signal dropped: the shifted site (2) should lose its
+    # reserved slot and pure score ordering should decide instead.
+    coord = _coordinator(capacity=2, max_age=1000, drop_signal="shift", alpha=1.0, beta=1.0, gamma=0.0, delta=1.0)
+    reports = {
+        1: _report(1, 0, utility=4, readiness=3, shift=0),  # best score, not shifted
+        2: _report(2, 0, utility=0, readiness=0, shift=2),  # shifted, worst score
+        3: _report(3, 0, utility=2, readiness=2, shift=0),  # middling score, not shifted
+    }
+    decision = coord.select(epoch=0, reports=reports, available=frozenset({1, 2, 3}))
+    assert decision.selected == {1, 3}  # C (3) wins the 2nd slot on score now that shift can't reserve it
+
+
+def test_drop_signal_readiness_forces_compressed_even_at_fastest_bin():
+    coord = _coordinator(capacity=1, max_age=1000, drop_signal="readiness")
+    reports = {1: _report(1, 0, utility=2, readiness=K_READINESS - 1, shift=1)}  # fastest readiness
+    decision = coord.select(epoch=0, reports=reports, available=frozenset({1}))
+    assert decision.selected == {1}
+    assert decision.assignments[1] == ScheduleMode.COMPRESSED  # readiness signal dropped -> never FULL
+
+
+def test_drop_signal_rejects_invalid_value():
+    with pytest.raises(ValueError):
+        _coordinator(capacity=1, max_age=1, drop_signal="not_a_signal")
+
+
+# ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
 

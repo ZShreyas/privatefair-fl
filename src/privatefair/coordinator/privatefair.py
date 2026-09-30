@@ -39,7 +39,15 @@ import numpy as np
 
 from privatefair.coordinator.participation import ParticipationTracker, required_now
 from privatefair.coordinator.posterior import decode_report
-from privatefair.interfaces import ALPHABET_SIZE, CohortDecision, Posterior, ScheduleMode, Signal, TelemetryReport
+from privatefair.interfaces import (
+    ALPHABET_SIZE,
+    SIGNALS,
+    CohortDecision,
+    Posterior,
+    ScheduleMode,
+    Signal,
+    TelemetryReport,
+)
 
 
 def _expected_bin(p: tuple[float, ...]) -> float:
@@ -93,6 +101,15 @@ class PrivateFairCoordinator:
     telemetry -- but contributes score 0.0, is never picked for the shifted-site
     slot (no posterior to judge shift from), and if selected gets COMPRESSED
     (readiness unknown, so never assume it can take a FULL load).
+
+    Two ablation knobs, both from report section 10.E (task B6):
+    `coverage=False` disables the reservation step entirely (step 1 below) --
+    everything else (shifted slot, score fill) is unaffected, isolating the
+    fairness constraint's cost/benefit. `drop_signal` removes one telemetry
+    signal from the decision everywhere it would otherwise matter: its score
+    weight is forced to 0, "shift" additionally disables the shifted-site slot,
+    and "readiness" additionally forces every selected site to COMPRESSED (same
+    as an unknown readiness) since the mode-assignment signal is gone too.
     """
 
     capacity: int
@@ -104,6 +121,8 @@ class PrivateFairCoordinator:
     beta: float = 1.0  # shift weight
     gamma: float = 0.1  # age weight -- raw epochs, kept small relative to the [0, 1]-scaled terms
     delta: float = 1.0  # readiness weight
+    coverage: bool = True  # False: no-coverage ablation (B6)
+    drop_signal: Signal | None = None  # B6: drop-one-signal ablation
     name: str = "privatefair"
     tracker: ParticipationTracker = field(default_factory=ParticipationTracker)
 
@@ -112,22 +131,41 @@ class PrivateFairCoordinator:
             raise ValueError(f"capacity must be >= 0, got {self.capacity}")
         if self.max_age < 0:
             raise ValueError(f"max_age must be >= 0, got {self.max_age}")
+        if self.drop_signal is not None and self.drop_signal not in SIGNALS:
+            raise ValueError(f"drop_signal must be one of {SIGNALS} or None, got {self.drop_signal!r}")
+
+    def _posterior(self, site_id: int, report: TelemetryReport | None, epoch: int) -> Posterior | None:
+        """Decode one site's posterior for this epoch, or None if there's nothing to decode from.
+
+        The default Bayes-decodes `report` (B2). Override this single seam to change
+        how a report is interpreted without touching the rest of `select()` -- see
+        `baselines.naive.NaiveDecodingCoordinator` (trust the report as exact) and
+        `baselines.oracle.RawOracleCoordinator` (ignore the report, use ground truth).
+        """
+        if report is None:
+            return None
+        return decode_report(report, self.epsilon, self.priors)
 
     def score(self, posterior: Posterior, age: int) -> float:
         """The constrained-selection score from report section 4."""
+        alpha = 0.0 if self.drop_signal == "utility" else self.alpha
+        beta = 0.0 if self.drop_signal == "shift" else self.beta
+        delta = 0.0 if self.drop_signal == "readiness" else self.delta
         return (
-            self.alpha * risk_hat(posterior)
-            + self.beta * p_shift_top(posterior)
+            alpha * risk_hat(posterior)
+            + beta * p_shift_top(posterior)
             + self.gamma * age
-            + self.delta * readiness_hat(posterior)
+            + delta * readiness_hat(posterior)
         )
 
     def select(self, epoch: int, reports: Mapping[int, TelemetryReport], available: frozenset[int]) -> CohortDecision:
         candidates = sorted(available)
         ages = {s: self.tracker.age(s, epoch) for s in candidates}
-        posteriors: dict[int, Posterior] = {
-            s: decode_report(reports[s], self.epsilon, self.priors) for s in candidates if s in reports
-        }
+        posteriors: dict[int, Posterior] = {}
+        for s in candidates:
+            p = self._posterior(s, reports.get(s), epoch)
+            if p is not None:
+                posteriors[s] = p
         scores = {s: (self.score(posteriors[s], ages[s]) if s in posteriors else 0.0) for s in candidates}
 
         overdue_set = frozenset(s for s in candidates if ages[s] >= self.max_age)
@@ -135,15 +173,17 @@ class PrivateFairCoordinator:
 
         # 1. Coverage reservation: the minimum set of oldest sites that must be
         # admitted now to keep every site's age bounded (see required_now's
-        # docstring) -- not just the sites already overdue.
-        need = min(required_now(ages.values(), self.capacity, self.max_age), self.capacity)
+        # docstring) -- not just the sites already overdue. Skipped entirely
+        # under the no-coverage ablation.
+        need = min(required_now(ages.values(), self.capacity, self.max_age), self.capacity) if self.coverage else 0
         order_by_age = sorted(candidates, key=lambda s: (-ages[s], -tiebreak[s]))
         reserved = frozenset(order_by_age[:need])
         selected: set[int] = set(reserved)
 
-        # 2. Shifted-site representation slot, if capacity remains.
+        # 2. Shifted-site representation slot, if capacity remains and the shift
+        # signal isn't the one being dropped.
         remaining = self.capacity - len(selected)
-        if remaining > 0:
+        if remaining > 0 and self.drop_signal != "shift":
             shifted_candidates = [
                 s for s in candidates if s not in selected and s in posteriors and is_likely_shifted(posteriors[s])
             ]
@@ -158,21 +198,24 @@ class PrivateFairCoordinator:
             selected.update(rest[:remaining])
 
         selected_frozen = frozenset(selected)
-        # Report only sites that were *already* overdue and got in as "mandatory" --
-        # a reservation can also admit a site slightly ahead of its deadline as part
-        # of keeping the schedule feasible; that's not the same as being overdue.
-        mandatory = overdue_set & selected_frozen
+        # Report only sites that were *already* overdue and got in under an active
+        # coverage rule as "mandatory" -- a reservation can also admit a site
+        # slightly ahead of its deadline as part of keeping the schedule feasible,
+        # and with coverage disabled nothing is ever truly mandatory.
+        mandatory = (overdue_set & selected_frozen) if self.coverage else frozenset()
 
         assignments: dict[int, ScheduleMode] = {}
         deferral_reasons: dict[int, str] = {}
         for s in candidates:
             if s in selected_frozen:
-                full_capable = s in posteriors and is_full_capable(posteriors[s])
+                full_capable = self.drop_signal != "readiness" and s in posteriors and is_full_capable(posteriors[s])
                 assignments[s] = ScheduleMode.FULL if full_capable else ScheduleMode.COMPRESSED
             else:
                 assignments[s] = ScheduleMode.DEFERRED
                 deferral_reasons[s] = (
-                    "coverage: overdue but capacity exceeded" if s in overdue_set else "not selected: score"
+                    "coverage: overdue but capacity exceeded"
+                    if s in overdue_set and self.coverage
+                    else "not selected: score"
                 )
 
         return CohortDecision(
