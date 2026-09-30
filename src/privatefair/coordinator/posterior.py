@@ -51,6 +51,30 @@ def decode_signal(y: int, k: int, epsilon: float, prior: tuple[float, ...] | Non
     return tuple(u / total for u in unnormalized)
 
 
+def one_hot(bin_value: int, k: int) -> tuple[float, ...]:
+    """A degenerate distribution with all mass on `bin_value` -- "trust this bin exactly."
+
+    Used where a caller wants a Posterior-shaped value without Bayesian correction:
+    e.g. B6's naive-decoding ablation (treat a noisy report as if it were the true
+    bin) and the raw-telemetry oracle (the bin *is* the true bin, ground truth, no
+    uncertainty to represent).
+    """
+    if not 0 <= bin_value < k:
+        raise ValueError(f"bin_value must be in [0, {k - 1}], got {bin_value}")
+    return tuple(1.0 if i == bin_value else 0.0 for i in range(k))
+
+
+def one_hot_posterior(site_id: int, epoch: int, utility: int, readiness: int, shift: int) -> Posterior:
+    """A Posterior with each signal's full mass on the given bin -- see `one_hot`."""
+    return Posterior(
+        site_id=site_id,
+        epoch=epoch,
+        p_utility=one_hot(utility, ALPHABET_SIZE["utility"]),
+        p_readiness=one_hot(readiness, ALPHABET_SIZE["readiness"]),
+        p_shift=one_hot(shift, ALPHABET_SIZE["shift"]),
+    )
+
+
 def decode_report(
     report: TelemetryReport,
     epsilon: float | Mapping[Signal, float],
