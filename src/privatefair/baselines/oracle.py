@@ -1,26 +1,27 @@
 """Raw-telemetry oracle coordinator (task B6, report section 10.E #3: "raw-telemetry
 adaptive oracle (upper bound; not privacy-preserving)").
 
-Decodes from `TrueBins` -- the exact bins a site's Privatizer would otherwise
-privatize -- instead of a coordinator-received `TelemetryReport`. It's fed via
-`observe_truth`, an optional hook the training loop calls before `select()` on
-any policy that defines one (agreed with A6 on issue #13). Ordinary `Coordinator`
-policies never define `observe_truth`, so they never see `TrueBins`; the
-`interfaces.py` `Coordinator` protocol is a structural `Protocol`, so adding this
-method doesn't touch that frozen contract at all, and `tests/test_boundaries.py`'s
-guard (scoped to `coordinator/`) is unaffected since this class lives outside
-that package specifically because it needs ground truth.
+Decodes from `TrueBins`/`raw` -- the exact, pre-quantization measurements a site's
+Privatizer would otherwise coarsen and privatize -- instead of a coordinator-received
+`TelemetryReport`. It's fed via `observe_truth`, an optional hook the training loop
+calls before `select()` on any policy that defines one (agreed with A6 on issue #13).
+Ordinary `Coordinator` policies never define `observe_truth`, so they never see
+`TrueBins`; the `interfaces.py` `Coordinator` protocol is a structural `Protocol`,
+so adding this method doesn't touch that frozen contract at all, and
+`tests/test_boundaries.py`'s guard (scoped to `coordinator/`) is unaffected since
+this class lives outside that package specifically because it needs ground truth.
 
-Scope note: this uses the *quantized* true bins (one-hot posteriors -- zero
-uncertainty, but still only K categories), not the raw pre-quantization
-continuous values (val_loss, shift_z, ...) that `raw` also carries. `raw` is
-accepted and stored for a future continuous-valued score, but the current score
-formula matches `PrivateFairCoordinator`'s categorical one exactly, just fed
-certain (ground-truth) inputs instead of decoded ones. That already isolates
-what this project's ablation plan needs from an oracle -- the effect of privacy
-noise, holding categorical coarsening fixed -- and stays robust to A6's raw-value
-dict shape still stabilizing. A richer continuous-valued oracle is a natural
-follow-up once that shape settles.
+Scores from the *continuous* pre-quantization values in `raw` (A6/#40's shape:
+val_loss, utility_delta, shift_z, expected_seconds, deadline_seconds), not the
+quantized `TrueBins` alone. That distinction is the whole point of having this
+class separate from B6's "quantized non-private" baseline
+(`baselines.naive.NaiveDecodingCoordinator` + `privacy.no_privacy.NoPrivacyPrivatizer`):
+report 10.E's oracle (#3) vs. quantized-non-private (#4) gap is supposed to measure
+what coarsening into K categories costs. Scoring the oracle from the one-hot of the
+same quantized bin the non-private baseline already sees makes that gap zero by
+construction -- caught in review (both made identical decisions in 1500/1500
+simulated rounds before this fix). Using the raw values here gives the oracle real
+information the coarsened baselines don't have, so the comparison is meaningful.
 """
 
 from __future__ import annotations
@@ -28,36 +29,120 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from privatefair.coordinator.posterior import one_hot_posterior
 from privatefair.coordinator.privatefair import PrivateFairCoordinator
-from privatefair.interfaces import Posterior, TelemetryReport, TrueBins
+from privatefair.interfaces import ALPHABET_SIZE, Posterior, TelemetryReport, TrueBins
+
+
+def _clip01(x: float) -> float:
+    return min(1.0, max(0.0, x))
+
+
+def _spread_expectation(target: float, k: int) -> tuple[float, ...]:
+    """A K-point distribution whose normalized expected bin (E[bin]/(K-1)) equals
+    `target` (clipped to [0, 1]) exactly, with mass split between the two integer
+    bins bracketing `target * (K-1)`.
+
+    This is how a continuous raw score gets fed into `risk_hat`/`readiness_hat`,
+    which are defined as exactly that normalized expectation -- so this
+    construction reuses those functions (and everything built on them:
+    `score()`, coverage, shifted-slot fill) unchanged, just with continuous
+    rather than quantized input.
+    """
+    target = _clip01(target)
+    pos = target * (k - 1)
+    lo = int(pos)
+    hi = min(lo + 1, k - 1)
+    frac = pos - lo
+    dist = [0.0] * k
+    dist[lo] += 1 - frac
+    dist[hi] += frac
+    return tuple(dist)
+
+
+def _shift_distribution(top_prob: float, k: int) -> tuple[float, ...]:
+    """A K-point distribution with exactly `top_prob` (clipped to [0, 1]) mass on
+    the last bin, the rest on the first.
+
+    Unlike utility/readiness, `p_shift_top` (`= p_shift[-1]`) is used directly as
+    a probability-like score in `PrivateFairCoordinator.score()`, and
+    `is_likely_shifted` checks whether the last bin is the argmax -- so this
+    puts `top_prob` there directly rather than going through the expected-bin
+    construction above, which would not preserve that value.
+    """
+    top_prob = _clip01(top_prob)
+    dist = [0.0] * k
+    dist[0] = 1 - top_prob
+    dist[-1] = top_prob
+    return tuple(dist)
 
 
 @dataclass
 class RawOracleCoordinator(PrivateFairCoordinator):
-    """PrivateFairCoordinator, but decoding uses TrueBins (ground truth) instead of a
-    privatized TelemetryReport.
+    """PrivateFairCoordinator, but decoding uses raw ground-truth measurements
+    (`TrueBins` + `raw`) instead of a privatized/decoded `TelemetryReport`.
 
     Call `observe_truth(true_bins, raw)` once per epoch, before `select()`, with
-    that epoch's true bins for every site (e.g. from `sim.true_bins.TrueBinsSimulator.compute`).
-    `select()` itself keeps the normal `Coordinator` signature and can be called
-    with `reports={}` -- this oracle never reads it.
+    that epoch's ground truth for every site (e.g. from
+    `sim.true_bins.TrueBinsSimulator.compute`, combined with A6's `raw` additions
+    for `expected_seconds`/`deadline_seconds`). `select()` itself keeps the
+    normal `Coordinator` signature and can be called with `reports={}` -- this
+    oracle never reads it.
+
+    If `select()` is called for an epoch that doesn't match the epoch
+    `observe_truth` was last called with (e.g. the loop forgot to call it that
+    round), every site is treated as having no ground truth available -- the
+    same "missing report" fallback as `PrivateFairCoordinator` -- rather than
+    silently reusing a previous round's stale truth.
 
     `epsilon`/`priors` are still required fields (inherited from PrivateFairCoordinator)
     but unused -- there is no privatized report to decode.
+
+    `utility_tau`/`shift_scale` set the continuous-to-[0,1] mapping for the risk
+    and shift scores; default to `sim.true_bins.TelemetryConfig`'s defaults
+    (`utility_tau=0.02`, the outer utility-bin edge is `2*utility_tau`; the
+    default `shift_thresholds` upper edge is 4.0) so the oracle's decision
+    boundaries line up with the quantized bins' by default. Pass the same values
+    your `TelemetryConfig` uses if you've changed them.
     """
 
     name: str = "raw_oracle"
+    utility_tau: float = 0.02
+    shift_scale: float = 4.0
     _true_bins: dict[int, TrueBins] = field(default_factory=dict, init=False, repr=False)
     _raw: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _truth_epoch: int | None = field(default=None, init=False, repr=False)
 
     def observe_truth(self, true_bins: dict[int, TrueBins], raw: dict[str, Any]) -> None:
         """Called by the training loop before select(), with this epoch's ground truth."""
         self._true_bins = dict(true_bins)
         self._raw = dict(raw)
+        self._truth_epoch = next((b.epoch for b in self._true_bins.values()), None)
+
+    def _risk_raw(self, site_id: int) -> float:
+        delta = self._raw.get("utility_delta", {}).get(site_id)
+        if delta is None:  # first epoch: no previous loss to compare against -- same "no signal" as A5's utility_bin
+            return 0.5
+        return _clip01((delta + 2 * self.utility_tau) / (4 * self.utility_tau))
+
+    def _shift_raw(self, site_id: int) -> float:
+        z = self._raw.get("shift_z", {}).get(site_id)
+        return 0.0 if z is None else _clip01(z / self.shift_scale)
+
+    def _readiness_raw(self, site_id: int) -> float:
+        expected = self._raw.get("expected_seconds", {}).get(site_id)
+        deadline = self._raw.get("deadline_seconds")
+        if expected is None or not deadline:  # no systems config: same "always fast" default as A5/A6
+            return 1.0
+        return _clip01(1 - expected / deadline)
 
     def _posterior(self, site_id: int, report: TelemetryReport | None, epoch: int) -> Posterior | None:
         true = self._true_bins.get(site_id)
-        if true is None:
+        if true is None or self._truth_epoch != epoch:
             return None
-        return one_hot_posterior(true.site_id, true.epoch, true.utility, true.readiness, true.shift)
+        return Posterior(
+            site_id=true.site_id,
+            epoch=true.epoch,
+            p_utility=_spread_expectation(self._risk_raw(site_id), ALPHABET_SIZE["utility"]),
+            p_readiness=_spread_expectation(self._readiness_raw(site_id), ALPHABET_SIZE["readiness"]),
+            p_shift=_shift_distribution(self._shift_raw(site_id), ALPHABET_SIZE["shift"]),
+        )

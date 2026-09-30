@@ -295,12 +295,18 @@ def test_drop_signal_shift_disables_shifted_slot():
     assert decision.selected == {1, 3}  # C (3) wins the 2nd slot on score now that shift can't reserve it
 
 
-def test_drop_signal_readiness_forces_compressed_even_at_fastest_bin():
+def test_drop_signal_readiness_defaults_to_full_regardless_of_reported_bin():
+    # No readiness info to act on -> assume FULL optimistically, even for a
+    # site that reported the *slowest* bin. Forcing COMPRESSED here would
+    # itself cut training compute regardless of whether it was warranted,
+    # confounding "lost information" with "lost compute". A genuinely slow
+    # site's real cost belongs in the systems simulation (deadline misses),
+    # not here.
     coord = _coordinator(capacity=1, max_age=1000, drop_signal="readiness")
-    reports = {1: _report(1, 0, utility=2, readiness=K_READINESS - 1, shift=1)}  # fastest readiness
+    reports = {1: _report(1, 0, utility=2, readiness=0, shift=1)}  # slowest readiness bin
     decision = coord.select(epoch=0, reports=reports, available=frozenset({1}))
     assert decision.selected == {1}
-    assert decision.assignments[1] == ScheduleMode.COMPRESSED  # readiness signal dropped -> never FULL
+    assert decision.assignments[1] == ScheduleMode.FULL
 
 
 def test_drop_signal_rejects_invalid_value():

@@ -108,8 +108,12 @@ class PrivateFairCoordinator:
     fairness constraint's cost/benefit. `drop_signal` removes one telemetry
     signal from the decision everywhere it would otherwise matter: its score
     weight is forced to 0, "shift" additionally disables the shifted-site slot,
-    and "readiness" additionally forces every selected site to COMPRESSED (same
-    as an unknown readiness) since the mode-assignment signal is gone too.
+    and "readiness" additionally assigns FULL to every selected site (an
+    optimistic default given no readiness info, not COMPRESSED -- forcing
+    COMPRESSED would itself halve training compute regardless of need, which
+    would confound "cost of losing the signal" with "cost of doing less
+    training"; a genuinely slow site's real cost then shows up correctly as a
+    deadline miss in the systems simulation instead).
     """
 
     capacity: int
@@ -208,7 +212,16 @@ class PrivateFairCoordinator:
         deferral_reasons: dict[int, str] = {}
         for s in candidates:
             if s in selected_frozen:
-                full_capable = self.drop_signal != "readiness" and s in posteriors and is_full_capable(posteriors[s])
+                if self.drop_signal == "readiness":
+                    # No readiness info to act on: assume FULL rather than forcing
+                    # COMPRESSED. Forcing COMPRESSED would itself halve training
+                    # compute regardless of whether a site actually needed it,
+                    # confounding "cost of losing the signal" with "cost of less
+                    # training". A genuinely slow site's real cost shows up
+                    # correctly as a deadline miss in the systems simulation.
+                    full_capable = True
+                else:
+                    full_capable = s in posteriors and is_full_capable(posteriors[s])
                 assignments[s] = ScheduleMode.FULL if full_capable else ScheduleMode.COMPRESSED
             else:
                 assignments[s] = ScheduleMode.DEFERRED
