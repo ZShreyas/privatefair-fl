@@ -1,0 +1,45 @@
+# Diagnostic 2 (issue #16): plain FedAvg, data-only, with a MILDER acquisition shift.
+# Question: is the 0.89 vs 0.30 normal/shifted gap mostly caused by an unrealistically strong shift?
+# Partition and which sites are shifted (4, 7) are unchanged: shift strength is the only difference.
+seed: 0
+
+data:
+  dataset: pathmnist
+  root: data/raw          # gitignored; downloaded on first use (~200MB)
+  image_size: 28
+  subsample: null         # e.g. 0.05 for smoke runs
+  n_sites: 8
+  dirichlet_alpha: 0.5    # lower = more label skew
+  size_sigma: 0.8         # lognormal spread of site sizes
+  min_site_size: 200
+  split: [0.7, 0.15, 0.15]  # per-site train / val / test
+  n_shifted: 2            # sites with synthetic acquisition shift
+  shift:                  # milder than pathmnist_dev.yaml (0.6 / 1.0 / 8.0)
+    contrast: 0.8
+    blur_sigma: 0.5
+    noise_std: 4.0
+
+model:
+  arch: resnet18
+  pretrained: true        # ImageNet weights (~45MB, cached by torchvision)
+  num_classes: 9
+
+train:                    # per site, per round (sim/local.py TrainConfig)
+  local_steps: 20         # fixed SGD steps, not epochs (sites have unequal sizes)
+  batch_size: 64
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  input_size: 64          # 28x28 upsampled; 224 is ~12x slower on CPU
+  eval_batch_size: 256
+
+fl:
+  rounds: 25              # compare with rounds 1-25 of the 50-round dev baseline (identical up to r25)
+  eval_every: 5           # per-site test eval at these rounds and the last one
+
+telemetry:                # simulator-side true bins (sim/true_bins.py TelemetryConfig)
+  utility_tau: 0.02       # relative val-loss change; bin edges at +-tau, +-2*tau
+  val_max_samples: 512    # fixed per-site val subset used for the utility signal
+  fast_fraction: 0.5      # readiness 3 if expected time <= this fraction of the deadline
+  shift_thresholds: [2.0, 4.0]  # z < 2 typical, 2-4 uncertain, >= 4 shifted (normal sites ~1)
+  reference_size: 1000    # public unshifted reference images for the shift detector
