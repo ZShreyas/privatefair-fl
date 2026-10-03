@@ -44,3 +44,19 @@ def test_does_not_mutate_inputs():
     b = {"w": np.array([3.0, 3.0, 3.0]), "count": np.array(1)}
     FedAvg().aggregate(GLOBAL, [_update(0, a), _update(1, b)])
     np.testing.assert_array_equal(a["w"], [1.0, 1.0, 1.0])
+
+
+def test_partial_key_updates_average_only_sent_keys():
+    g = {"frozen": np.full(2, 7.0), "w": np.zeros(2)}
+    ups = [_update(0, {"w": np.array([1.0, 1.0])}), _update(1, {"w": np.array([3.0, 5.0])})]
+    out = FedAvg().aggregate(g, ups)
+    np.testing.assert_allclose(out["w"], [2.0, 3.0])
+    np.testing.assert_array_equal(out["frozen"], [7.0, 7.0])
+
+
+def test_mismatched_key_sets_raise():
+    import pytest
+
+    ups = [_update(0, {"w": np.ones(3), "count": np.array(1)}), _update(1, {"w": np.ones(3)})]
+    with pytest.raises(ValueError, match="different key sets"):
+        FedAvg().aggregate(GLOBAL, ups)

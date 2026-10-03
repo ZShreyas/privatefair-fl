@@ -21,12 +21,16 @@ model:
   arch: resnet18
   pretrained: true
   num_classes: 9
+  # freeze_backbone: false   # true = train only layer4[-1] + head; FedAvg/bytes cover just those
 
 train:
   local_steps: 2
   batch_size: 16
   input_size: 32
   eval_batch_size: 256
+  # Performance options (all default to current behaviour):
+  # device: cpu           # cpu | auto (CUDA if available) | cuda
+  # amp: false            # fp16 autocast, CUDA only. Meant for T4-class GPUs (Kaggle/Colab), NOT GTX 16-series
 
 fl:
   rounds: 2
