@@ -30,6 +30,8 @@ train:                    # per site, per round (sim/local.py TrainConfig)
   weight_decay: 0.0005
   input_size: 64          # 28x28 upsampled; 224 is ~12x slower on CPU
   eval_batch_size: 256
+  # device: cpu          # cpu | auto (CUDA if available) | cuda
+  # amp: false            # fp16 autocast, CUDA only. Meant for T4-class GPUs (Kaggle/Colab), NOT GTX 16-series
 
 fl:
   rounds: 50
