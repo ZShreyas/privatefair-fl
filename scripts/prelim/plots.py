@@ -58,7 +58,7 @@ def final_eval(logs: list):
 def finish(fig, ax, title: str, path: Path) -> None:
     ax.set_title(f"{title}\n{MARK}", fontsize=11)
     ax.spines[["top", "right"]].set_visible(False)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.1, 1, 1) if fig.texts else None)  # leave room for a caption, if any
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"wrote {path}")
@@ -108,23 +108,32 @@ def plot_max_age(runs: dict, runs_dir: Path, out: Path) -> None:
     for i, name in enumerate(POLICIES):  # different widths/styles so identical lines stay visible
         if name not in runs:
             continue
-        ages = [max(log.participation_age.values()) for log in runs[name]]
-        ax.plot(
-            range(1, len(ages) + 1),
-            ages,
-            color=COLORS[name],
-            label=LABELS[name],
-            lw=5 - i,
-            ls=("-", "--", "-", "--")[i],
-        )
+        rounds = range(1, len(runs[name]) + 1)
+        raw = [max(log.participation_age.values()) for log in runs[name]]
+        # Ages of sites that were online that round (the coverage rule only forces available sites).
+        avail = [
+            max((a for s, a in log.participation_age.items() if s in log.sim_only.get("available", [s])), default=0)
+            for log in runs[name]
+        ]
+        ax.plot(rounds, raw, color=COLORS[name], lw=1, alpha=0.3)  # faint: raw max over all sites
+        ax.plot(rounds, avail, color=COLORS[name], label=LABELS[name], lw=5 - i, ls=("-", "--", "-", "--")[i])
         ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
         cfg = json.loads((runs_dir / f"{name}-s0" / "config.json").read_text(encoding="utf-8"))
         max_age = cfg["policy"].get("max_age", max_age)
     if max_age is not None:
         ax.axhline(max_age, color="black", ls="--", lw=1, label=f"max_age limit ({max_age})")
     ax.set_xlabel("round")
-    ax.set_ylabel("max participation age (rounds)")
+    ax.set_ylabel("max age, available sites (rounds)")
     ax.legend(frameon=False)
+    fig.text(
+        0.5,
+        0.005,
+        "Faint lines: max over all sites. It exceeds the limit only while the overdue site is offline\n"
+        "or, once forced in, misses its deadline. The coverage rule can only force available sites.",
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+    )
     finish(fig, ax, "Maximum participation age over rounds", out / "c_max_age.png")
 
 
@@ -135,13 +144,22 @@ def summarize(runs: dict) -> pd.DataFrame:
         shifted = set(last.sim_only["shifted_sites"])
         accs = {s: m[METRIC] for s, m in last.per_site_metrics.items()}
         eps = list(logs[-1].epsilon_spent.values())
+        evals = [log for log in logs if log.per_site_metrics][-3:]  # last 3 evaluation rounds
+        mean_last3 = sum(
+            sum(m[METRIC] for m in log.per_site_metrics.values()) / len(log.per_site_metrics) for log in evals
+        ) / len(evals)
+        worst_last3 = sum(min(m[METRIC] for m in log.per_site_metrics.values()) for log in evals) / len(evals)
+        n_reports = sum(len(log.telemetry) for log in logs)  # one report = one site's privatized triple in a round
         rows.append(
             {
                 "run": name,
                 "rounds": len(logs),
                 "mean_acc": sum(accs.values()) / len(accs),
                 "worst_site_acc": min(accs.values()),
+                "mean_acc_last3": mean_last3,
+                "worst_site_acc_last3": worst_last3,
                 "shifted_mean_acc": sum(accs[s] for s in shifted) / len(shifted) if shifted else float("nan"),
+                "reports_per_site": n_reports / len(accs),
                 "eps_per_site_max": max(eps),
                 "eps_per_site_mean": sum(eps) / len(eps),
                 "sim_seconds_total": sum(log.round_seconds for log in logs),
@@ -163,8 +181,11 @@ def write_summary(df: pd.DataFrame, out: Path) -> None:
         for row in show.itertuples(index=False)
     )
     note = (
-        "\nAccuracies are final-round per-site test **balanced accuracy**. ε is the composed budget per site "
-        "(sum over all released reports; 0 when nothing is privatized). Time is simulated seconds.\n"
+        "\nAccuracies are per-site test **balanced accuracy**: `mean_acc`, `worst_site_acc` and `shifted_mean_acc` "
+        "are at the final round; `*_last3` average the mean / worst-site accuracy over the last 3 evaluations "
+        "(rounds 40, 45, 50). `reports_per_site` = telemetry reports (one per signal triple) a site released over "
+        "the run, on average. ε is the composed budget per site (sum over all released reports and signals; 0 when "
+        "nothing is privatized). Time is simulated seconds.\n"
     )
     (out / "summary.md").write_text(f"# Summary\n\n_{MARK}_\n\n{header}{body}{note}", encoding="utf-8")
     print(f"wrote {out / 'summary.md'}")
