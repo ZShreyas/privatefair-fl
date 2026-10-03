@@ -1,0 +1,72 @@
+# Preliminary results (single seed). Copy of pathmnist_privatefair.yaml; differences: train.device/amp,
+# model.freeze_backbone (chosen by timing on the GTX 1650: full training ~22 min per 50 rounds for fedavg_all),
+# and the policy/privacy lines marked PRELIM.
+seed: 0
+
+data:
+  dataset: pathmnist
+  root: data/raw          # gitignored; downloaded on first use (~200MB)
+  image_size: 28
+  subsample: null         # e.g. 0.05 for smoke runs
+  n_sites: 8
+  dirichlet_alpha: 0.5    # lower = more label skew
+  size_sigma: 0.8         # lognormal spread of site sizes
+  min_site_size: 200
+  split: [0.7, 0.15, 0.15]  # per-site train / val / test
+  n_shifted: 2            # sites with synthetic acquisition shift
+  shift:
+    contrast: 0.6
+    blur_sigma: 1.0
+    noise_std: 8.0
+
+model:
+  arch: resnet18
+  pretrained: true        # ImageNet weights (~45MB, cached by torchvision)
+  num_classes: 9
+  freeze_backbone: true   # PRELIM: timing-based choice, see header
+
+train:                    # per site, per round (sim/local.py TrainConfig)
+  local_steps: 20         # fixed SGD steps, not epochs (sites have unequal sizes)
+  batch_size: 64
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  device: cuda            # PRELIM: GTX 1650
+  amp: false              # PRELIM
+  input_size: 64          # 28x28 upsampled; 224 is ~12x slower on CPU
+  eval_batch_size: 256
+
+fl:
+  rounds: 50
+  eval_every: 5           # per-site test eval at these rounds and the last one
+
+telemetry:                # simulator-side true bins (sim/true_bins.py TelemetryConfig)
+  utility_tau: 0.02       # relative val-loss change; bin edges at +-tau, +-2*tau
+  val_max_samples: 512    # fixed per-site val subset used for the utility signal
+  fast_fraction: 0.5      # readiness 3 if expected time <= this fraction of the deadline
+  shift_thresholds: [2.0, 4.0]  # z < 2 typical, 2-4 uncertain, >= 4 shifted (normal sites ~1)
+  reference_size: 1000    # public unshifted reference images for the shift detector
+
+systems:                  # A4 (sim/systems.py SystemsConfig); all times are simulated seconds
+  step_seconds: 1.0       # per local step at a median-speed site
+  speed_sigma: 0.6        # lognormal spread of site compute speed
+  bandwidth_mbps: 50.0    # median bandwidth
+  bandwidth_sigma: 0.8
+  jitter_sigma: 0.15      # round-to-round compute noise
+  p_available: 0.85       # long-run online fraction
+  stickiness: 0.7         # outages last several rounds (0 = independent each round)
+  deadline_factor: 1.5    # deadline = 1.5 x median expected full-round time
+
+policy:                   # A6 (sim/policies.py): fedavg_all | random | coverage_random | privatefair
+  name: fedavg_all        # PRELIM
+  capacity: 3             # sites per round
+  max_age: 5              # hard coverage: no site waits more than 5 rounds (3 x 5 = 15 >= 8 sites: real slack)
+  alpha: 1.0              # score weights (report section 4): risk
+  beta: 1.0               # shift
+  gamma: 0.1              # participation age (raw rounds)
+  delta: 1.0              # readiness
+
+privacy:                  # local DP on the three telemetry signals
+  mode: rr                # rr = K-ary randomized response; none = non-private (B6 baselines only)
+  epsilon: 1.0            # per signal per report (one value, or utility/readiness/shift mapping)
+  cap: null               # max composed epsilon per site over the run; exceeding it stops the run
