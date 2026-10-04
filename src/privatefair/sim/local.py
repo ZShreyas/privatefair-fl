@@ -85,16 +85,20 @@ def train_local(
     train_mode(model)
     params = [p for p in model.parameters() if p.requires_grad]  # frozen backbone: only the trainable part
     opt = torch.optim.SGD(params, lr=cfg.lr, momentum=cfg.momentum, weight_decay=cfg.weight_decay)
-    scaler = torch.amp.GradScaler("cuda", enabled=cfg.amp_active)
+    scaler = torch.amp.GradScaler("cuda") if cfg.amp_active else None  # never built on the non-AMP path
     y_t = torch.as_tensor(np.asarray(y).reshape(-1), dtype=torch.long, device=device)
     losses = []
     for idx in _batches(len(y_t), min(cfg.batch_size, len(y_t)), cfg.local_steps, rng):
         with torch.autocast(device.type, dtype=torch.float16, enabled=cfg.amp_active):
             loss = F.cross_entropy(model(preprocess(x[idx], cfg.input_size, device)), y_t[idx])
         opt.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
-        scaler.step(opt)
-        scaler.update()
+        if scaler is None:
+            loss.backward()
+            opt.step()
+        else:
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
         losses.append(loss.item())
     return TrainResult(
         get_weights(model, trainable_keys(model)), cfg.local_steps, float(np.mean(losses)) if losses else float("nan")

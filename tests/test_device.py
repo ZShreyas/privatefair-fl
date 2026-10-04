@@ -152,6 +152,15 @@ def test_run_info_written(tmp_path):
     assert info["trainable_params"] < info["total_params"]
 
 
+def test_no_grad_scaler_without_amp(data, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("GradScaler constructed on the non-AMP path")
+
+    monkeypatch.setattr(torch.amp, "GradScaler", boom)
+    cfg = TrainConfig(local_steps=3, batch_size=8, input_size=32, amp=False)
+    assert np.isfinite(train_local(_model(), *data, cfg, np.random.default_rng(0)).mean_loss)
+
+
 # --- CUDA (skipped without a GPU) --------------------------------------------------------------
 @CUDA
 def test_cuda_train_and_evaluate(data):

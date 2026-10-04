@@ -11,7 +11,7 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 # Heavy ML stack. CI does NOT install this, so keep core logic importable without torch.
-ml = ["torch>=2.2", "torchvision>=0.17", "medmnist>=3.0", "flwr-datasets[vision]>=0.5"]
+ml = ["torch>=2.3", "torchvision>=0.18", "medmnist>=3.0", "flwr-datasets[vision]>=0.5"]
 exp = ["pyyaml>=6", "pandas>=2", "matplotlib>=3.8"]
 dev = ["pytest>=8", "ruff>=0.5"]
 
