@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 
+from privatefair.baselines.naive import NaiveDecodingCoordinator
 from privatefair.coordinator.policies import CoverageRandomPolicy, RandomPolicy
 from privatefair.coordinator.privatefair import PrivateFairCoordinator
 from privatefair.interfaces import SIGNALS, Coordinator, Signal
@@ -118,3 +119,18 @@ def _privatefair(cfg: Mapping[str, Any], privacy: PrivacyConfig, rng: np.random.
         **weights,
     )
     return PolicySpec("privatefair", coord, uses_telemetry=True)
+
+
+@register("naive_decoding")
+def _naive_decoding(cfg: Mapping[str, Any], privacy: PrivacyConfig, rng: np.random.Generator) -> PolicySpec:
+    """B6 quantized non-private baseline with privacy.mode "none"; with "rr" it is the naive-decoding ablation."""
+    weights = {k: cfg[k] for k in ("alpha", "beta", "gamma", "delta") if k in cfg}
+    coord = NaiveDecodingCoordinator(
+        capacity=cfg["capacity"],
+        max_age=cfg["max_age"],
+        rng=rng,
+        epsilon=privacy.epsilon,  # inherited field, unused by naive decoding
+        priors=privacy.decoding_priors(),
+        **weights,
+    )
+    return PolicySpec("naive_decoding", coord, uses_telemetry=True)

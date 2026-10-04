@@ -58,3 +58,10 @@ def test_privacy_config_from_dict_converts_priors():
     p = PrivacyConfig.from_dict({"epsilon": eps, "priors": {"shift": [0.8, 0.1, 0.1]}})
     assert p.decoding_priors() == {"shift": (0.8, 0.1, 0.1)}
     assert PrivacyConfig.from_dict(None) == PrivacyConfig()
+
+
+def test_naive_decoding_builds_with_non_private_mode():
+    from privatefair.baselines.naive import NaiveDecodingCoordinator
+
+    spec = build_policy({"name": "naive_decoding", "capacity": 2, "max_age": 3}, PrivacyConfig(mode="none"), RNG)
+    assert isinstance(spec.coordinator, NaiveDecodingCoordinator) and spec.uses_telemetry
