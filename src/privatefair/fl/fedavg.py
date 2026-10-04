@@ -34,8 +34,14 @@ class FedAvg:
         done = [u for u in updates if u.completed]  # deadline misses contribute nothing
         if not done:
             return global_weights
-        out = {}
-        for key in global_weights:
+        keys = list(done[0].weights)
+        for u in done[1:]:
+            if set(u.weights) != set(keys):
+                diff = sorted(set(u.weights) ^ set(keys))
+                raise ValueError(f"updates in one round have different key sets (site {u.site_id}): {diff[:5]}")
+        # Frozen-backbone runs send only the trainable keys; everything else stays as in the global model.
+        out = dict(global_weights)
+        for key in keys:
             vals = [u.weights[key] for u in done]
             # Integer buffers (BatchNorm's num_batches_tracked) are counters, not parameters.
             out[key] = sum(vals[1:], vals[0]) / len(vals) if _is_float(vals[0]) else _copy(vals[0])

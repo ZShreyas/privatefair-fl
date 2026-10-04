@@ -22,6 +22,7 @@ Without a `policy` the log is byte-identical to the A3/A4 loop.
 from __future__ import annotations
 
 import dataclasses
+import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -40,7 +41,7 @@ from privatefair.privacy.ledger import PrivacyLedger
 from privatefair.privacy.rr import RandomizedResponsePrivatizer
 from privatefair.runlog import RunLogger
 from privatefair.sim.local import TrainConfig, evaluate, train_local
-from privatefair.sim.model import Weights, build_model, get_weights, set_weights
+from privatefair.sim.model import Weights, build_model, count_params, get_weights, set_weights, trainable_keys
 from privatefair.sim.policies import PolicySpec, PrivacyConfig, build_policy
 from privatefair.sim.shift_detector import ShiftDetector
 from privatefair.sim.systems import (
@@ -82,6 +83,23 @@ def stream_rng(seed: int, *key: int) -> np.random.Generator:
     return np.random.default_rng(np.random.SeedSequence(seed, spawn_key=key))
 
 
+def _log_startup(logger: RunLogger, model, device, train_cfg: TrainConfig, freeze_backbone: bool) -> None:
+    trainable, total = count_params(model)
+    info = {
+        "device": str(device),
+        "amp": train_cfg.amp_active,  # effective: false on CPU even if train.amp is true
+        "freeze_backbone": freeze_backbone,
+        "trainable_params": trainable,
+        "total_params": total,
+    }
+    print(
+        f"device={info['device']} amp={'on' if info['amp'] else 'off'} freeze_backbone={freeze_backbone} "
+        f"trainable_params={trainable:,}/{total:,}",
+        flush=True,
+    )
+    (logger.dir / "run_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+
+
 def _to_wire(report: TelemetryReport) -> TelemetryReport:
     """What crosses the network: exactly the five payload keys, schema-checked on arrival."""
     return TelemetryReport.from_payload(report.to_payload())
@@ -102,6 +120,7 @@ def run_fedavg(
     seed: int,
     logger: RunLogger,
     pretrained: bool = True,
+    freeze_backbone: bool = False,
     systems: SystemsConfig | None = None,
     verbose: bool = False,
     policy: PolicySpec | None = None,
@@ -117,9 +136,14 @@ def run_fedavg(
     """
     start = time.perf_counter()
     torch.manual_seed(seed)
-    model = build_model(num_classes, pretrained=pretrained)
-    global_w = get_weights(model)
-    nbytes = model_bytes(global_w)
+    # Built on CPU so the seeded head init does not depend on the device.
+    model = build_model(num_classes, pretrained=pretrained, freeze_backbone=freeze_backbone)
+    device = train_cfg.torch_device
+    model.to(device)
+    global_w = get_weights(model)  # always full and on CPU: FedAvg, logging and comparisons never see the GPU
+    keys = trainable_keys(model)  # None unless the backbone is frozen
+    nbytes = model_bytes(global_w if keys is None else {k: global_w[k] for k in keys})  # only what is transmitted
+    _log_startup(logger, model, device, train_cfg, freeze_backbone)
     aggregator = FedAvg()
     ids = [s.site_id for s in sites]
     rngs = {s.site_id: site_rng(seed, s.site_id) for s in sites}
@@ -136,7 +160,8 @@ def run_fedavg(
     if policy is not None and policy.needs_truth:
         if reference is None:
             raise ValueError(f"policy {policy.name!r} needs true bins: pass reference=(images, labels)")
-        detector = ShiftDetector(input_size=train_cfg.input_size, pretrained=pretrained).fit(*reference, num_classes)
+        detector = ShiftDetector(input_size=train_cfg.input_size, pretrained=pretrained, device=device)
+        detector.fit(*reference, num_classes)
         truth_rng = stream_rng(seed, TRUTH_STREAM)
         tel_cfg = telemetry or TelemetryConfig()
         truth_sim = TrueBinsSimulator(sites, detector, tel_cfg, train_cfg, num_classes, truth_rng)
@@ -396,6 +421,7 @@ def run_from_config(
         seed=seed,
         logger=logger,
         pretrained=model_cfg.get("pretrained", True),
+        freeze_backbone=model_cfg.get("freeze_backbone", False),
         systems=SystemsConfig(**cfg["systems"]) if cfg.get("systems") else None,
         verbose=verbose,
         policy=policy,

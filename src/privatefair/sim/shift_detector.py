@@ -32,11 +32,20 @@ def _style(m: np.ndarray, q: np.ndarray, w: np.ndarray | None = None) -> np.ndar
 
 
 class ShiftDetector:
-    def __init__(self, input_size: int = 64, pretrained: bool = True, batch_size: int = 256, n_null: int = 50) -> None:
+    def __init__(
+        self,
+        input_size: int = 64,
+        pretrained: bool = True,
+        batch_size: int = 256,
+        n_null: int = 50,
+        device: torch.device | str = "cpu",
+    ) -> None:
         m = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         self.encoder = nn.Sequential(m.conv1, m.bn1, m.relu, m.maxpool, m.layer1).eval()
         for p in self.encoder.parameters():
             p.requires_grad_(False)
+        self.encoder.to(device)
+        self.device = torch.device(device)
         self.input_size, self.batch_size, self.n_null = input_size, batch_size, n_null
         self._ref_m: np.ndarray | None = None  # per-image channel means, (R, C)
         self._ref_q: np.ndarray | None = None  # per-image channel second moments, (R, C)
@@ -45,9 +54,9 @@ class ShiftDetector:
     def _moments(self, images: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         ms, qs = [], []
         for start in range(0, len(images), self.batch_size):
-            f = self.encoder(preprocess(images[start : start + self.batch_size], self.input_size))
-            ms.append(f.mean(dim=(2, 3)).numpy())
-            qs.append((f * f).mean(dim=(2, 3)).numpy())
+            f = self.encoder(preprocess(images[start : start + self.batch_size], self.input_size, self.device))
+            ms.append(f.mean(dim=(2, 3)).cpu().numpy())
+            qs.append((f * f).mean(dim=(2, 3)).cpu().numpy())
         return np.concatenate(ms).astype(np.float64), np.concatenate(qs).astype(np.float64)
 
     def fit(self, reference_images: np.ndarray, reference_labels: np.ndarray, num_classes: int) -> ShiftDetector:
